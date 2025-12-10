@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -19,6 +22,7 @@
     "lottie-react": "^2.4.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-is": "^19.2.1",
     "react-router-dom": "^7.9.6",
     "recharts": "^3.5.1",
     "xlsx": "^0.18.5"
