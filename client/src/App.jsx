@@ -93,6 +93,8 @@ export default function App() {
             <>
               <Link to="/" className={getLinkClass("/")}>Home</Link>
 
+              
+
               <Link to="/service-home" className={getLinkClass("/service-home")}>
                 Services
               </Link>
@@ -127,6 +129,18 @@ export default function App() {
               <Link to="/admin-login" className={getLinkClass("/admin-login")}>
                 Admin Login
               </Link>
+
+               {/* ⭐ ABOUT DROPDOWN (BEST UX) */}
+    <div className="dropdown">
+      <span className="nav-link">About ▾</span>
+      <div className="dropdown-content">
+        <Link to="/about">About Us</Link>
+        <Link to="/contact">Contact Us</Link>
+        <Link to="/terms">Terms & Conditions</Link>
+        <Link to="/privacy">Privacy Policy</Link>
+        <Link to="/refund">Refund Policy</Link>
+      </div>
+    </div>
             </>
           )}
 

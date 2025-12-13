@@ -53,6 +53,9 @@ import AdminServiceProviders from "./pages/AdminServiceProviders";
 
 import Layout from "./components/Layout";
 
+import Legal from "./pages/Legal";
+
+
 ReactDOM.createRoot(document.getElementById("root")).render(
   <BrowserRouter>
     <Routes>
@@ -124,6 +127,21 @@ ReactDOM.createRoot(document.getElementById("root")).render(
         <Route path="marketing-executive/referrals" element={<MEReferredAgents />} />
         <Route path="marketing-executive/referrals/service-providers" element={<MarketingExecutiveReferralList />} />
         <Route path="/marketing-reset-password/:token" element={<MarketingResetPassword />}/>
+
+
+        {/* -------- LEGAL / COMPLIANCE -------- */}
+<Route path="legal" element={<Legal />} />
+<Route path="terms" element={<Legal />} />
+<Route path="terms-and-conditions" element={<Legal />} />
+<Route path="privacy" element={<Legal />} />
+<Route path="privacy-policy" element={<Legal />} />
+<Route path="refund" element={<Legal />} />
+<Route path="refund-policy" element={<Legal />} />
+<Route path="about" element={<Legal />} />
+<Route path="about-us" element={<Legal />} />
+<Route path="contact" element={<Legal />} />
+<Route path="contact-us" element={<Legal />} />
+
 </Route>
       </Route>
     </Routes>
