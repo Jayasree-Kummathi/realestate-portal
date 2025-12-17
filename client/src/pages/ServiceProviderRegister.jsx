@@ -161,132 +161,103 @@ export default function ServiceProviderRegister() {
   };
 
   // SUBMIT
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+const handleSubmit = async (e) => {
+  e.preventDefault();
 
-    if (!aadhar || !voter) {
-      setMsg("❌ Please upload Aadhar & Voter ID");
-      setShake(true);
-      setTimeout(() => setShake(false), 500);
-      return;
+  if (!aadhar || !voter) {
+    setMsg("❌ Please upload Aadhar & Voter ID");
+    return;
+  }
+
+  let finalServices = [...form.selectedServices];
+  if (form.customService.trim()) {
+    finalServices.push(form.customService.trim());
+  }
+
+  if (finalServices.length === 0) {
+    setMsg("❌ Please select at least one service");
+    return;
+  }
+
+  setLoading(true);
+  setMsg("Redirecting to payment...");
+
+  try {
+    /* ===============================
+       1️⃣ CREATE ORDER (CASHFREE)
+    =============================== */
+    const fd = new FormData();
+    fd.append("name", form.name);
+    fd.append("email", form.email);
+    fd.append("phone", form.phone);
+    fd.append("password", form.password);
+    fd.append("serviceCategory", form.serviceCategory);
+    fd.append("selectedServices", JSON.stringify(finalServices));
+    fd.append("referralMarketingExecutiveName", form.referralMarketingExecutiveName);
+    fd.append("referralMarketingExecutiveId", form.referralMarketingExecutiveId);
+    fd.append("aadhar", aadhar);
+    fd.append("voter", voter);
+    if (pan) fd.append("pan", pan);
+
+    const { data } = await api.post(
+      "/payments/service-provider/create-order",
+      fd,
+      { headers: { "Content-Type": "multipart/form-data" } }
+    );
+
+    const paymentSessionId =
+      data.paymentSessionId || data.payment_session_id;
+
+    const { tempId, order } = data;
+
+    if (!paymentSessionId) {
+      throw new Error("Missing payment session id");
     }
 
-    // Build final service list
-    let finalServices = [...form.selectedServices];
-    if (form.customService.trim() !== "") {
-      finalServices.push(form.customService.trim());
-    }
-
-    if (finalServices.length === 0) {
-      setMsg("❌ Please select at least one service");
-      setShake(true);
-      setTimeout(() => setShake(false), 500);
-      return;
-    }
-
-    setLoading(true);
-    setMsg("Processing registration...");
-
-    try {
-      const fd = new FormData();
-      fd.append("name", form.name);
-      fd.append("email", form.email);
-      fd.append("phone", form.phone);
-      fd.append("password", form.password);
-      fd.append("serviceCategory", form.serviceCategory);
-      fd.append("selectedServices", JSON.stringify(finalServices));
-      fd.append("referralMarketingExecutiveName", form.referralMarketingExecutiveName);
-      fd.append("referralMarketingExecutiveId", form.referralMarketingExecutiveId);
-      fd.append("aadhar", aadhar);
-      fd.append("voter", voter);
-      if (pan) fd.append("pan", pan);
-
-      const { data } = await api.post(
-        "/payments/service-provider/create-order",
-        fd,
-        { headers: { "Content-Type": "multipart/form-data" } }
-      );
-
-      // Load Razorpay
-      if (!window.Razorpay) {
-        await new Promise((resolve) => {
-          const script = document.createElement("script");
-          script.src = "https://checkout.razorpay.com/v1/checkout.js";
-          script.onload = resolve;
-          document.body.appendChild(script);
-        });
-      }
-
-      // Success animation before payment
-      setMsg("✅ Details verified! Opening payment gateway...");
-
-      const rzp = new window.Razorpay({
-        key: data.key_id,
-        amount: data.order.amount,
-        currency: data.order.currency,
-        order_id: data.order.id,
-        name: "RealEstate Portal",
-        description: "Service Provider Subscription",
-        theme: {
-          color: "#4f46e5",
-        },
-        prefill: {
-          name: form.name,
-          email: form.email,
-          contact: form.phone,
-        },
-        handler: async function (response) {
-          try {
-            await api.post("/payments/service-provider/verify", {
-              tempId: data.tempId,
-              razorpay_order_id: response.razorpay_order_id,
-              razorpay_payment_id: response.razorpay_payment_id,
-              razorpay_signature: response.razorpay_signature,
-            });
-
-            // Success animation
-            setMsg("🎉 Registration successful! Redirecting...");
-            
-            // Celebration particles
-            for (let i = 0; i < 20; i++) {
-              setTimeout(() => {
-                const confetti = document.createElement('div');
-                confetti.style.cssText = `
-                  position: absolute;
-                  width: 10px;
-                  height: 10px;
-                  background: ${i % 3 === 0 ? '#f59e0b' : i % 3 === 1 ? '#10b981' : '#8b5cf6'};
-                  border-radius: 50%;
-                  top: 50%;
-                  left: 50%;
-                  animation: confetti ${Math.random() * 1 + 0.5}s linear forwards;
-                  z-index: 9999;
-                `;
-                containerRef.current?.appendChild(confetti);
-                setTimeout(() => confetti.remove(), 1000);
-              }, i * 50);
-            }
-
-            setTimeout(() => navigate("/service-provider-login"), 2000);
-          } catch (error) {
-            setMsg("❌ Payment verification failed");
-          }
-        },
-        modal: {
-          ondismiss: function() {
-            setMsg("⚠️ Payment cancelled. You can try again.");
-            setLoading(false);
-          }
-        }
+    /* ===============================
+       2️⃣ LOAD CASHFREE SDK
+    =============================== */
+    if (!window.Cashfree) {
+      await new Promise((resolve) => {
+        const script = document.createElement("script");
+        script.src = "https://sdk.cashfree.com/js/v3/cashfree.js";
+        script.onload = resolve;
+        document.body.appendChild(script);
       });
-
-      rzp.open();
-    } catch (err) {
-      console.error(err);
-      setMsg("❌ Registration failed. Please try again.");
-      setLoading(false);
     }
-  };
+
+    /* ===============================
+       3️⃣ SAVE TEMP DATA
+    =============================== */
+    sessionStorage.setItem("providerTempId", tempId);
+    sessionStorage.setItem("providerOrderId", order.order_id);
+
+    /* ===============================
+       4️⃣ OPEN CASHFREE CHECKOUT
+    =============================== */
+    const cashfreeMode =
+      import.meta.env.VITE_CASHFREE_MODE === "production"
+        ? "production"
+        : "sandbox";
+
+    console.log("💳 Cashfree mode:", cashfreeMode);
+
+    const cashfree = new window.Cashfree({
+      mode: cashfreeMode,
+    });
+
+    cashfree.checkout({
+      paymentSessionId,
+      redirectTarget: "_self",
+    });
+
+  } catch (err) {
+    console.error(err);
+    setMsg("❌ Registration failed. Please try again.");
+    setLoading(false);
+  }
+};
+
 
   // Common input style
   const inputStyle = {

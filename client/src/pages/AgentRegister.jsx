@@ -134,102 +134,76 @@ export default function AgentRegister() {
     });
   }
 
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setIsSubmitting(true);
-    setMsg("Processing payment...");
+async function handleSubmit(e) {
+  e.preventDefault();
+  setIsSubmitting(true);
+  setMsg("Redirecting to payment...");
 
-    if (!voterFile) {
-      setMsg("❌ Please upload Voter ID for verification");
-      setIsSubmitting(false);
-      return;
-    }
-
-    const finalProfession =
-      form.profession === "Other" ? form.customProfession : form.profession;
-
-    try {
-      const voterIdBase64 = voterFile ? await fileToBase64(voterFile) : null;
-
-      const { data } = await api.post("/payments/agent/create-order", {
-        pendingAgent: { ...form, profession: finalProfession },
-      });
-
-      if (!window.Razorpay) {
-        await new Promise((resolve) => {
-          const script = document.createElement("script");
-          script.src = "https://checkout.razorpay.com/v1/checkout.js";
-          script.onload = resolve;
-          document.body.appendChild(script);
-        });
-      }
-
-      new window.Razorpay({
-        key: data.key_id,
-        order_id: data.order.id,
-        amount: data.order.amount,
-        currency: data.order.currency,
-        name: "RealEstate Portal",
-        description: "Agent Registration ₹1500",
-        theme: {
-          color: "#8b5cf6",
-        },
-        handler: async (response) => {
-          try {
-            await api.post("/payments/agent/verify", {
-              tempId: data.tempId,
-              ...response,
-              voterIdBase64,
-            });
-            
-            // Celebration animation
-            setMsg("🎉 Registration Successful!");
-            
-            // Confetti effect
-            const card = document.querySelector('.agent-card');
-            for (let i = 0; i < 30; i++) {
-              setTimeout(() => {
-                const confetti = document.createElement('div');
-                confetti.className = 'confetti';
-                confetti.style.cssText = `
-                  position: absolute;
-                  width: 10px;
-                  height: 10px;
-                  background: ${i % 4 === 0 ? '#f59e0b' : i % 4 === 1 ? '#10b981' : i % 4 === 2 ? '#8b5cf6' : '#ef4444'};
-                  border-radius: ${i % 2 === 0 ? '50%' : '0'};
-                  top: 50%;
-                  left: 50%;
-                  animation: confetti ${Math.random() * 1.5 + 0.5}s linear forwards;
-                  z-index: 1000;
-                `;
-                card.appendChild(confetti);
-                setTimeout(() => confetti.remove(), 2000);
-              }, i * 50);
-            }
-
-            setTimeout(() => navigate("/agent-login"), 2000);
-          } catch (error) {
-            setMsg("❌ Verification failed. Please contact support.");
-          }
-        },
-        modal: {
-          ondismiss: function() {
-            setMsg("⚠️ Payment cancelled. You can try again.");
-            setIsSubmitting(false);
-          }
-        },
-        prefill: {
-          name: form.name,
-          email: form.email,
-          contact: form.phone,
-        },
-      }).open();
-    } catch (err) {
-      console.error(err);
-      setMsg("❌ Payment failed. Please try again.");
-      setIsSubmitting(false);
-    }
+  if (!voterFile) {
+    setMsg("❌ Please upload Voter ID for verification");
+    setIsSubmitting(false);
+    return;
   }
+
+  const finalProfession =
+    form.profession === "Other" ? form.customProfession : form.profession;
+
+  try {
+    const voterIdBase64 = await fileToBase64(voterFile);
+
+    // 1️⃣ Create Cashfree order
+    const { data } = await api.post("/payments/agent/create-order", {
+      pendingAgent: { ...form, profession: finalProfession },
+    });
+
+    const paymentSessionId =
+      data.paymentSessionId || data.payment_session_id;
+
+    const { orderId, tempId } = data;
+
+    if (!paymentSessionId) {
+      throw new Error("Missing payment session id");
+    }
+
+    // 2️⃣ Load Cashfree SDK if not present
+    if (!window.Cashfree) {
+      await new Promise((resolve) => {
+        const script = document.createElement("script");
+        script.src = "https://sdk.cashfree.com/js/v3/cashfree.js";
+        script.onload = resolve;
+        document.body.appendChild(script);
+      });
+    }
+
+    // 3️⃣ Store temp data
+    sessionStorage.setItem("agentTempId", tempId);
+    sessionStorage.setItem("agentOrderId", orderId);
+    sessionStorage.setItem("agentVoterId", voterIdBase64);
+
+    // ✅ 4️⃣ ENV-BASED MODE SWITCH
+    const cashfreeMode =
+      import.meta.env.VITE_CASHFREE_MODE === "production"
+        ? "production"
+        : "sandbox";
+
+    console.log("💳 Cashfree mode:", cashfreeMode);
+
+    const cashfree = new window.Cashfree({
+      mode: cashfreeMode,
+    });
+
+    cashfree.checkout({
+      paymentSessionId,
+      redirectTarget: "_self",
+    });
+
+  } catch (err) {
+    console.error(err);
+    setMsg("❌ Payment failed. Please try again.");
+    setIsSubmitting(false);
+  }
+}
+
 
   const handleNext = () => {
     if (step === 1 && (!form.name || !form.email || !form.phone)) {

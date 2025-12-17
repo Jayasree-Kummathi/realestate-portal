@@ -94,7 +94,12 @@ async function sendEnquiryNotification(agent, property, enquiry) {
   return sendMail(receiverEmail, "New Property Enquiry", html);
 }
 
+
+
+
+
 module.exports = {
   sendMail,
   sendEnquiryNotification,
+
 };

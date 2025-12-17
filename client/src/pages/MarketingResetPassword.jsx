@@ -31,7 +31,8 @@ export default function MarketingResetPassword() {
       );
       setMsg("✅ Password reset successful");
 
-      setTimeout(() => nav("/marketing-login"), 1500);
+      setTimeout(() => nav("/marketing-executive/login"), 1500);
+
     } catch (err) {
       setMsg(err.response?.data?.error || "Reset failed");
     } finally {

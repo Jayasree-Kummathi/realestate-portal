@@ -13,7 +13,12 @@ const ServiceEnquiry = require("../models/ServiceEnquiry");
 const { auth } = require("../middleware/auth");
 
 const router = express.Router();
-const sendMail = require("../utils/sendMail");
+const { sendWelcomeEmail } = require("../utils/emailTemplates");
+const { sendServiceEnquiryEmail } = require("../utils/emailTemplates");
+
+
+
+
 
 /* =============================================================================
    📁 Ensure folders exist
@@ -182,8 +187,10 @@ router.post("/payments/verify", async (req, res) => {
 
     const temp = JSON.parse(fs.readFileSync(tempFile));
 
+    // 🔐 Hash password
     const hashedPassword = await bcrypt.hash(temp.provider.password, 10);
 
+    // 🧑 Create provider
     const provider = new ServiceProvider({
       name: temp.provider.name,
       email: temp.provider.email,
@@ -192,9 +199,10 @@ router.post("/payments/verify", async (req, res) => {
       serviceCategory: temp.provider.serviceCategory,
       serviceTypes: temp.provider.selectedServices,
       referralAgent: temp.provider.referralAgentId,
-       referralMarketingExecutiveName: temp.provider.referralMarketingExecutiveName || null,
-  referralMarketingExecutiveId: temp.provider.referralMarketingExecutiveId || null,
-
+      referralMarketingExecutiveName:
+        temp.provider.referralMarketingExecutiveName || null,
+      referralMarketingExecutiveId:
+        temp.provider.referralMarketingExecutiveId || null,
       documents: temp.files,
       status: "active",
       subscription: {
@@ -203,14 +211,66 @@ router.post("/payments/verify", async (req, res) => {
       },
     });
 
+    // 💾 Save provider
     await provider.save();
-    try { fs.unlinkSync(tempFile); } catch {}
+    console.log("✅ Provider saved with ID:", provider._id);
 
-    res.json({ success: true, provider });
+    // 📧 SEND WELCOME EMAIL
+    let emailSent = false;
+    let emailError = null;
+    
+    try {
+      console.log("📧 Sending welcome email to:", provider.email);
+      
+      // Call the sendWelcomeEmail function
+      const emailResult = await sendWelcomeEmail({
+        to: provider.email,
+        name: provider.name,
+        role: "service-provider",
+      });
+      
+      console.log("✅ Email sending result:", emailResult);
+      emailSent = true;
+      console.log("✅ Welcome email sent successfully to:", provider.email);
+      
+    } catch (mailErr) {
+      emailError = mailErr.message;
+      console.error("❌ Welcome email failed:");
+      console.error("Error Message:", mailErr.message);
+      console.error("Error Stack:", mailErr.stack);
+      
+      // Don't fail the whole process if email fails
+      console.log("⚠️ Continuing registration despite email failure");
+    }
+
+    // 🧹 Cleanup temp file
+    try {
+      fs.unlinkSync(tempFile);
+      console.log("✅ Temp file cleaned up:", tempFile);
+    } catch (cleanupErr) {
+      console.error("⚠️ Temp file cleanup failed:", cleanupErr.message);
+    }
+
+    // 📤 Response
+    res.json({
+      success: true,
+      providerId: provider._id,
+      email: provider.email,
+      emailSent,
+      emailError: emailError || undefined,
+      message: emailSent 
+        ? "Registration successful! Welcome email sent."
+        : "Registration successful! Welcome email failed but account created."
+    });
 
   } catch (err) {
-    console.error("VERIFY ERROR:", err);
-    res.status(500).json({ error: "Verification failed" });
+    console.error("❌ VERIFY ERROR:");
+    console.error("Error Message:", err.message);
+    console.error("Error Stack:", err.stack);
+    res.status(500).json({ 
+      error: "Verification failed",
+      details: err.message 
+    });
   }
 });
 
@@ -405,57 +465,14 @@ router.post("/service/enquiry", async (req, res) => {
     await enquiry.save();
 
     // ✅ SEND EMAIL TO SERVICE PROVIDER (OR ADMIN)
-    await sendMail({
+await sendServiceEnquiryEmail({
   to: s.provider.email,
-  subject: "📩 New Service Enquiry Received",
-  html: `
-  <div style="background:#f4f6f8;padding:20px;font-family:Arial,Helvetica,sans-serif;">
-    <div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,0.08)">
-
-      <!-- Header -->
-      <div style="background:#1e88e5;color:#ffffff;padding:20px;text-align:center;">
-        <h2 style="margin:0;font-size:22px;">New Service Enquiry</h2>
-        <p style="margin:5px 0 0;font-size:14px;opacity:0.9;">
-          You have received a new enquiry
-        </p>
-      </div>
-
-      <!-- Body -->
-      <div style="padding:20px;color:#333;">
-        <table width="100%" cellpadding="8" cellspacing="0" style="border-collapse:collapse;">
-          <tr>
-            <td style="font-weight:600;width:30%;">Service</td>
-            <td>${s.title}</td>
-          </tr>
-          <tr style="background:#f9fafb;">
-            <td style="font-weight:600;">Customer Name</td>
-            <td>${name}</td>
-          </tr>
-          <tr>
-            <td style="font-weight:600;">Phone</td>
-            <td>${phone}</td>
-          </tr>
-          <tr style="background:#f9fafb;">
-            <td style="font-weight:600;">Message</td>
-            <td>${message || "No additional message"}</td>
-          </tr>
-        </table>
-      </div>
-
-      <!-- Footer -->
-      <div style="background:#f1f3f4;padding:15px;text-align:center;font-size:12px;color:#666;">
-        <p style="margin:0;">
-          Please contact the customer as soon as possible.
-        </p>
-        <p style="margin:5px 0 0;">
-          © ${new Date().getFullYear()} RealEstate Portal
-        </p>
-      </div>
-
-    </div>
-  </div>
-  `,
+  title: s.title,
+  name,
+  phone,
+  message,
 });
+
 
 
     res.json({ success: true });

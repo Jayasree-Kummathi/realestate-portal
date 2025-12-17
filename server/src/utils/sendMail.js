@@ -7,7 +7,7 @@ const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
     user: process.env.MAIL_EMAIL,
-    pass: process.env.MAIL_APP_PASSWORD, // ✅ Gmail App Password
+    pass: process.env.MAIL_APP_PASSWORD.replace(/\s/g, ""), // important
   },
 });
 
@@ -31,20 +31,15 @@ async function sendMail({ to, subject, html }) {
     return { skipped: true };
   }
 
-  try {
-    const info = await transporter.sendMail({
-      from: `"RealEstate Portal" <${process.env.MAIL_EMAIL}>`,
-      to,
-      subject,
-      html,
-    });
+  const info = await transporter.sendMail({
+    from: `"RealEstate Portal" <${process.env.MAIL_EMAIL}>`,
+    to,
+    subject,
+    html,
+  });
 
-    console.log("✅ Email sent:", info.messageId, "→", to);
-    return info;
-  } catch (err) {
-    console.error("❌ Email sending failed:", err.message);
-    throw err;
-  }
+  console.log("✅ Email sent:", info.messageId, "→", to);
+  return info;
 }
 
-module.exports = sendMail;
+module.exports = sendMail ;

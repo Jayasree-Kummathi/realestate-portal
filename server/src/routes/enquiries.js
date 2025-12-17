@@ -7,9 +7,15 @@ const ServiceEnquiry = require("../models/ServiceEnquiry");
 const Property = require("../models/Property");
 const Service = require("../models/Service");
 
-const sendMail = require("../utils/sendMail");
+const { sendMail } = require("../utils/sendMail");
+
 const { enquiryEmailTemplate } = require("../utils/emailTemplates"); // ✅ ADD
+//const { sendPropertyEnquiryEmail } = require("../utils/emailTemplates");
 const { auth } = require("../middleware/auth");
+
+const {
+  sendPropertyEnquiryEmail,
+} = require("../utils/emailTemplates");
 
 /* ============================================================================
    1️⃣ PUBLIC — SUBMIT PROPERTY ENQUIRY
@@ -19,7 +25,7 @@ router.post("/", async (req, res) => {
     const { propertyId, name, email, phone, message } = req.body;
 
     const property = await Property.findById(propertyId)
-      .populate("agent", "name email")
+      .populate("agent", "name email phone")
       .populate("owner", "name email");
 
     if (!property)
@@ -32,38 +38,46 @@ router.post("/", async (req, res) => {
       email,
       phone,
       message,
+      type: "property",
+      status: "new",
     });
 
     await enquiry.save();
 
-    /* ✅ SEND EMAIL USING TEMPLATE */
+    /* ✅ SEND EMAIL USING NEW FUNCTION */
     const receiver = property.agent || property.owner;
 
     if (receiver?.email) {
-      await sendMail({
+      await sendPropertyEnquiryEmail({
         to: receiver.email,
-        subject: `New Property Enquiry – ${property.title}`,
-        html: enquiryEmailTemplate({
-          logoUrl: "https://yourdomain.com/logo.png", // ✅ REQUIRED
-          enquiryType: "Property Enquiry",
-          title: property.title,
-          name,
-          email,
-          phone,
-          message,
-        }),
+        propertyTitle: property.title,
+        propertyType: property.propertyType || property.type,
+        propertyPrice: property.price,
+        propertyLocation: property.location || property.areaName,
+        propertyId: property.propertyId || property._id,
+        name,
+        email,
+        phone,
+        message,
+        agentName: receiver.name,
+        agentPhone: receiver.phone
       });
+      
+      console.log(`✅ Property enquiry email sent to ${receiver.email}`);
     } else {
       console.warn("⚠ Property enquiry: receiver email missing");
     }
 
-    res.json({ success: true, enquiry });
+    res.json({ 
+      success: true, 
+      enquiry,
+      message: "Enquiry submitted successfully" 
+    });
   } catch (err) {
     console.error("PROPERTY ENQUIRY ERROR:", err);
     res.status(500).json({ error: "Failed to submit property enquiry" });
   }
 });
-
 /* ============================================================================
    1️⃣B PUBLIC — SUBMIT SERVICE ENQUIRY
 ============================================================================ */

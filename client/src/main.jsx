@@ -55,6 +55,9 @@ import Layout from "./components/Layout";
 
 import Legal from "./pages/Legal";
 
+import PaymentSuccess from "./pages/PaymentSuccess";
+
+
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <BrowserRouter>
@@ -142,6 +145,13 @@ ReactDOM.createRoot(document.getElementById("root")).render(
 <Route path="contact" element={<Legal />} />
 <Route path="contact-us" element={<Legal />} />
 
+
+{/* -------- PAYMENT SUCCESS -------- */}
+  <Route
+    path="agent-payment-success"
+    element={<PaymentSuccess />}
+  />
+<Route path="provider-payment-success" element={<PaymentSuccess />} />
 </Route>
       </Route>
     </Routes>

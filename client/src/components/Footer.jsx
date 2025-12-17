@@ -75,9 +75,9 @@ export default function Footer() {
           {/* Contact */}
           <div>
             <h4 style={styles.heading}>Contact</h4>
-            <p style={styles.text}>📍 Mumbai, India</p>
-            <p style={styles.text}>📞 +91 98765 43210</p>
-            <p style={styles.text}>✉️ support@realestate.com</p>
+            <p style={styles.text}>📍 Flat No. 401, Sri Rama Towers, 4th Floor, Miyapur Main Road, Opp SBI Bank, Hyderabad – 500049</p>
+            <p style={styles.text}>📞 +91 83416 02908</p>
+            <p style={styles.text}>✉️ miithyderabad@gmail.com</p>
           </div>
         </div>
 
