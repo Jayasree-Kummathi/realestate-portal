@@ -4,9 +4,91 @@ const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
 const Property = require("../models/Property");
+const Agent = require("../models/Agent");
 const { auth } = require("../middleware/auth");
 
+const subscriptionGuard = require("../middleware/subscriptionGuard");
+
 const router = express.Router();
+
+/* ==========================================================
+   🔑 HELPER — SUBSCRIPTION CHECK
+========================================================== */
+function isSubscriptionValid(subscription) {
+  if (!subscription) return false;
+  if (!subscription.active) return false;
+
+  const now = new Date();
+
+  // ✅ Use expiresAt if available
+  if (subscription.expiresAt) {
+    return new Date(subscription.expiresAt) > now;
+  }
+
+  // ✅ Fallback: calculate expiry from paidAt
+  if (subscription.paidAt) {
+    const paidAt = new Date(subscription.paidAt);
+    const expiresAt = new Date(paidAt);
+    expiresAt.setMonth(expiresAt.getMonth() + 1);
+    return expiresAt > now;
+  }
+
+  return false;
+}
+
+
+/* ==========================================================
+   🔑 HELPER — GET AGENT SUBSCRIPTION STATUS
+========================================================== */
+async function getAgentSubscriptionStatus(agentId) {
+  try {
+    if (!agentId) return { valid: true, isAgent: false }; // Allow non-agent posts (admin/owner)
+    
+    const agent = await Agent.findById(agentId).select("subscription");
+    if (!agent) return { valid: false, isAgent: false };
+    
+    return {
+      valid: isSubscriptionValid(agent.subscription),
+      isAgent: true,
+      subscription: agent.subscription
+    };
+  } catch (err) {
+    console.error("Error checking agent subscription:", err);
+    return { valid: false, isAgent: false };
+  }
+}
+
+/* ==========================================================
+   🔑 HELPER — CHECK USER SUBSCRIPTION (FOR POSTING)
+========================================================== */
+async function canUserPostProperties(user) {
+  // Admin bypass
+  if (user.isAdmin) return { allowed: true, reason: "Admin user" };
+  
+  // Non-agents cannot post properties
+  if (!user.isAgent) return { 
+    allowed: false, 
+    reason: "Only agents can post properties" 
+  };
+  
+  // Check agent subscription
+  const agent = await Agent.findById(user.id).select("subscription");
+  if (!agent) return { 
+    allowed: false, 
+    reason: "Agent not found" 
+  };
+  
+  if (!isSubscriptionValid(agent.subscription)) {
+    return { 
+      allowed: false, 
+      reason: "Subscription expired", 
+      subscription: agent.subscription,
+      renewRequired: true 
+    };
+  }
+  
+  return { allowed: true, reason: "Valid subscription" };
+}
 
 /* ---------------------- Ensure Upload Directories ---------------------- */
 const IMAGES_DIR = "uploads/images";
@@ -42,28 +124,24 @@ function safeDelete(relPath) {
     if (!relPath) return;
     const abs = path.join(process.cwd(), relPath.replace(/^\//, ""));
     if (fs.existsSync(abs)) fs.unlinkSync(abs);
-  } catch (e) {
+  } catch {
     // ignore
   }
 }
 
 /* ===========================================================
-   1) AGENT DASHBOARD LIST (Active only) — agent or admin
-   GET /api/properties/agent/dashboard/list
+   1️⃣ AGENT DASHBOARD LIST (SHOW ALL OWN PROPERTIES)
    =========================================================== */
 router.get("/agent/dashboard/list", auth, async (req, res) => {
   try {
-    // allow agent and admin
     if (!req.user.isAgent && !req.user.isAdmin) {
       return res.status(403).json({ error: "Access denied" });
     }
 
-    const userId = req.user.id; // using req.user.id (confirmed)
     const properties = await Property.find({
-      active: { $ne: false },
-      $or: [{ agent: userId }, { owner: userId }],
+      $or: [{ agent: req.user.id }, { owner: req.user.id }],
     })
-      .populate("agent", "_id name email")
+      .populate("agent", "_id name email subscription")
       .populate("owner", "_id name email")
       .sort({ createdAt: -1 });
 
@@ -75,8 +153,7 @@ router.get("/agent/dashboard/list", auth, async (req, res) => {
 });
 
 /* ===========================================================
-   2) CREATE / POST PROPERTY (single route handling files)
-   POST /api/properties
+   2️⃣ CREATE PROPERTY (SUBSCRIPTION REQUIRED)
    =========================================================== */
 router.post(
   "/",
@@ -87,71 +164,76 @@ router.post(
   ]),
   async (req, res) => {
     try {
-      // Only admins or subscribed users (agents) can post
-      if (!req.user.isAdmin && !req.user.subscription?.active && !req.user.isAgent) {
-        return res
-          .status(403)
-          .json({ error: "Subscription required to post properties" });
+      // Check if user can post properties
+      const canPost = await canUserPostProperties(req.user);
+      if (!canPost.allowed) {
+        return res.status(403).json({
+          error: canPost.reason,
+          renewRequired: canPost.renewRequired || false,
+          subscription: canPost.subscription
+        });
       }
 
-      // req.body may come as fields (multipart). Required fields check:
+      // Validate required fields
       if (!req.body.title || req.body.title.trim() === "") {
         return res.status(400).json({ error: "Title is required" });
       }
 
-      const data = req.body;
-
-      // Build images list from uploaded files
+      // Process images
       const images = (req.files?.images || []).map(
         (f) => `/${IMAGES_DIR}/${f.filename}`
       );
 
+      // Process video
       const videoUrl =
         req.files?.video?.[0] && `/${VIDEOS_DIR}/${req.files.video[0].filename}`;
 
-      // parse location if provided as JSON string
+      // Process location
       let location;
-      if (data.location) {
+      if (req.body.location) {
         try {
-          const loc = typeof data.location === "string" ? JSON.parse(data.location) : data.location;
-          if (loc && loc.lng !== undefined && loc.lat !== undefined) {
+          const loc =
+            typeof req.body.location === "string"
+              ? JSON.parse(req.body.location)
+              : req.body.location;
+          if (loc?.lng && loc?.lat) {
             location = {
               type: "Point",
               coordinates: [Number(loc.lng), Number(loc.lat)],
             };
           }
-        } catch (err) {
-          console.warn("Invalid location JSON:", err.message);
-        }
+        } catch {}
       }
 
-      // Ensure numeric fields are converted if needed
-      if (data.price) data.price = Number(data.price);
-
-      // Build property document
+      // Create property
       const property = new Property({
-        title: data.title,
-        description: data.description || "",
-         listingType: data.listingType || "Sell",
-        areaName: data.areaName || "",
-        city: data.city || "",
-        price: data.price || 0,
-        address: data.address || "",
-        nearestPlace: data.nearestPlace || "",
-        nearbyHighway: data.nearbyHighway || "",
-        projectName: data.projectName || "",
+        title: req.body.title,
+        description: req.body.description || "",
+        listingType: req.body.listingType || "Sell",
+        areaName: req.body.areaName || "",
+        city: req.body.city || "",
+        price: Number(req.body.price) || 0,
+        address: req.body.address || "",
+        nearestPlace: req.body.nearestPlace || "",
+        nearbyHighway: req.body.nearbyHighway || "",
+        projectName: req.body.projectName || "",
         images,
         videoUrl,
         location,
         active: true,
         owner: req.user.id,
-        postedBy: req.user.id,
         agent: req.user.isAgent ? req.user.id : null,
+        subscriptionValid: true, // Flag to indicate subscription was valid at time of posting
+        postedAt: new Date(),
       });
 
       await property.save();
-
-      res.json({ message: "Property posted successfully!", property });
+      
+      res.json({ 
+        success: true,
+        message: "Property posted successfully!", 
+        property 
+      });
     } catch (err) {
       console.error("Post property failed:", err);
       res.status(500).json({ error: "Post property failed" });
@@ -160,17 +242,16 @@ router.post(
 );
 
 /* ===========================================================
-   3) GET ALL ACTIVE PROPERTIES (PUBLIC)
-   GET /api/properties
+   3️⃣ GET ALL ACTIVE PROPERTIES (PUBLIC — FILTER EXPIRED AGENTS)
    =========================================================== */
 router.get("/", async (req, res) => {
   try {
-    const { city, areaName, search } = req.query;
+    const { city, areaName, search, showAll = false } = req.query;
 
-    const query = {
-      active: { $ne: false },
-    };
+    // Build base query
+    const query = { active: true };
 
+    // Apply filters
     if (city) query.city = { $regex: city, $options: "i" };
     if (areaName) query.areaName = { $regex: areaName, $options: "i" };
 
@@ -181,15 +262,47 @@ router.get("/", async (req, res) => {
         { description: regex },
         { city: regex },
         { areaName: regex },
+        { projectName: regex },
       ];
     }
 
+    // Fetch properties with agent data
     const props = await Property.find(query)
-      .populate("agent", "_id name email")
+      .populate({
+        path: "agent",
+        select: "_id name email phone subscription",
+      })
       .populate("owner", "_id name email")
       .sort({ createdAt: -1 });
 
-    res.json(props);
+    // Filter out properties from agents with expired subscriptions (unless showAll flag is true)
+    const filtered = props.filter(property => {
+      // If property has no agent (posted by admin/owner), always show
+      if (!property.agent) return true;
+      
+      // If showAll flag is true, show all properties regardless of subscription
+      if (showAll === "true") return true;
+      
+      // Check agent's subscription
+      const subscriptionValid = isSubscriptionValid(property.agent?.subscription);
+      return subscriptionValid;
+    });
+
+    // Add subscription status to each property for frontend
+    const enhancedProperties = filtered.map(property => {
+      const propertyObj = property.toObject();
+      
+      if (property.agent) {
+        propertyObj.agentSubscriptionValid = isSubscriptionValid(property.agent.subscription);
+        propertyObj.agentSubscriptionExpires = property.agent.subscription?.expiresAt;
+      } else {
+        propertyObj.agentSubscriptionValid = true; // No agent means admin/owner post
+      }
+      
+      return propertyObj;
+    });
+
+    res.json(enhancedProperties);
   } catch (err) {
     console.error("Failed to load properties:", err);
     res.status(500).json({ error: "Failed to load properties" });
@@ -197,21 +310,41 @@ router.get("/", async (req, res) => {
 });
 
 /* ===========================================================
-   4) GET SINGLE ACTIVE PROPERTY
-   GET /api/properties/:id
+   4️⃣ GET SINGLE PROPERTY (PUBLIC — FILTER EXPIRED)
    =========================================================== */
 router.get("/:id", async (req, res) => {
   try {
     const property = await Property.findOne({
       _id: req.params.id,
-      active: { $ne: false },
+      active: true,
     })
-      .populate("agent", "_id name email")
+      .populate("agent", "_id name email phone subscription")
       .populate("owner", "_id name email");
 
-    if (!property) return res.status(404).json({ error: "Property not found" });
+    if (!property) {
+      return res.status(404).json({ 
+        error: "Property not found or has been removed" 
+      });
+    }
 
-    res.json(property);
+    // Check if agent's subscription is valid
+    if (property.agent && !isSubscriptionValid(property.agent.subscription)) {
+      return res.status(403).json({ 
+        error: "This property is currently unavailable. The agent's subscription has expired.",
+        subscriptionExpired: true,
+        propertyId: property._id,
+        agentId: property.agent._id
+      });
+    }
+
+    // Add subscription info to response
+    const propertyObj = property.toObject();
+    if (property.agent) {
+      propertyObj.agentSubscriptionValid = isSubscriptionValid(property.agent.subscription);
+      propertyObj.agentSubscriptionExpires = property.agent.subscription?.expiresAt;
+    }
+
+    res.json(propertyObj);
   } catch (err) {
     console.error("Unable to load property:", err);
     res.status(500).json({ error: "Unable to load property" });
@@ -219,8 +352,7 @@ router.get("/:id", async (req, res) => {
 });
 
 /* ===========================================================
-   5) UPDATE PROPERTY
-   PUT /api/properties/:id
+   5️⃣ UPDATE PROPERTY (SUBSCRIPTION REQUIRED)
    =========================================================== */
 router.put(
   "/:id",
@@ -231,9 +363,11 @@ router.put(
   ]),
   async (req, res) => {
     try {
+      // Find property
       const property = await Property.findById(req.params.id);
       if (!property) return res.status(404).json({ error: "Property not found" });
 
+      // Check ownership
       const isOwner = property.owner?.toString() === req.user.id;
       const isAgent = property.agent?.toString() === req.user.id;
 
@@ -241,73 +375,99 @@ router.put(
         return res.status(403).json({ error: "Unauthorized" });
       }
 
-      if (!req.user.isAdmin && !req.user.subscription?.active) {
-        return res.status(403).json({ error: "Subscription inactive" });
+      // Check subscription for non-admin agents
+      if (!req.user.isAdmin && req.user.isAgent) {
+        const canPost = await canUserPostProperties(req.user);
+        if (!canPost.allowed) {
+          return res.status(403).json({
+            error: canPost.reason,
+            renewRequired: canPost.renewRequired || false
+          });
+        }
       }
 
+      // Update basic fields
       const fields = [
-        "title",
-        "description",
-        "areaName",
-        "price",
-        "address",
-        "nearestPlace",
-         "listingType",
-        "nearbyHighway",
-        "projectName",
-        "city",
+        "title", "description", "listingType", "areaName", "city",
+        "price", "address", "nearestPlace", "nearbyHighway", "projectName"
       ];
 
-      fields.forEach((f) => {
-        if (req.body[f] !== undefined) {
-          // Convert price to number if necessary
-          property[f] = f === "price" ? Number(req.body[f]) : req.body[f];
+      fields.forEach((field) => {
+        if (req.body[field] !== undefined) {
+          if (field === "price") {
+            property[field] = Number(req.body[field]);
+          } else {
+            property[field] = req.body[field];
+          }
         }
       });
 
-      // Location update
+      // Update location
       if (req.body.location) {
         try {
-          const loc = typeof req.body.location === "string" ? JSON.parse(req.body.location) : req.body.location;
-          if (loc && loc.lng !== undefined && loc.lat !== undefined) {
+          const loc = typeof req.body.location === "string" 
+            ? JSON.parse(req.body.location) 
+            : req.body.location;
+          if (loc?.lng && loc?.lat) {
             property.location = {
               type: "Point",
               coordinates: [Number(loc.lng), Number(loc.lat)],
             };
           }
-        } catch {}
-      }
-
-      // Remove images by index if requested
-      if (req.body.removeImages) {
-        try {
-          const remove = Array.isArray(req.body.removeImages)
-            ? req.body.removeImages.map(Number)
-            : JSON.parse(req.body.removeImages);
-          remove.forEach((i) => {
-            const img = property.images[i];
-            if (img) safeDelete(img);
-          });
-          property.images = property.images.filter((_, i) => !remove.includes(i));
-        } catch (e) {
-          // ignore parse error
+        } catch (err) {
+          console.warn("Invalid location format:", err.message);
         }
       }
 
-      // Append newly uploaded images
-      if (req.files?.images?.length) {
-        req.files.images.forEach((f) => property.images.push(`/${IMAGES_DIR}/${f.filename}`));
+      // Handle image removal
+      if (req.body.removeImages) {
+        try {
+          const removeIndices = Array.isArray(req.body.removeImages)
+            ? req.body.removeImages.map(Number)
+            : JSON.parse(req.body.removeImages);
+          
+          // Delete files and remove from array
+          removeIndices.forEach((index) => {
+            if (property.images[index]) {
+              safeDelete(property.images[index]);
+            }
+          });
+          
+          property.images = property.images.filter(
+            (_, index) => !removeIndices.includes(index)
+          );
+        } catch (e) {
+          console.warn("Error parsing removeImages:", e.message);
+        }
       }
 
-      // Handle video upload (replace existing)
+      // Add new images
+      if (req.files?.images?.length) {
+        req.files.images.forEach((file) => {
+          property.images.push(`/${IMAGES_DIR}/${file.filename}`);
+        });
+      }
+
+      // Update video
       if (req.files?.video?.length) {
+        // Delete old video
         if (property.videoUrl) safeDelete(property.videoUrl);
         property.videoUrl = `/${VIDEOS_DIR}/${req.files.video[0].filename}`;
       }
 
+      // Update subscription validity flag
+      if (req.user.isAgent) {
+        const agent = await Agent.findById(req.user.id).select("subscription");
+        property.subscriptionValid = isSubscriptionValid(agent?.subscription);
+      }
+
       await property.save();
 
-      res.json({ message: "Property updated", property });
+      res.json({ 
+        success: true,
+        message: "Property updated successfully", 
+        property 
+      });
     } catch (err) {
       console.error("Update failed:", err);
       res.status(500).json({ error: "Update failed" });
@@ -316,8 +476,7 @@ router.put(
 );
 
 /* ===========================================================
-   6) SOFT DELETE (Active → false)
-   DELETE /api/properties/:id
+   6️⃣ SOFT DELETE
    =========================================================== */
 router.delete("/:id", auth, async (req, res) => {
   try {
@@ -334,7 +493,10 @@ router.delete("/:id", auth, async (req, res) => {
     property.active = false;
     await property.save();
 
-    res.json({ success: true, message: "Deleted" });
+    res.json({ 
+      success: true, 
+      message: "Property deleted successfully" 
+    });
   } catch (err) {
     console.error("Delete failed:", err);
     res.status(500).json({ error: "Delete failed" });
@@ -342,12 +504,113 @@ router.delete("/:id", auth, async (req, res) => {
 });
 
 /* ===========================================================
-   7) Filters & Suggestions
+   7️⃣ GET PROPERTIES BY AGENT ID (PUBLIC — WITH SUBSCRIPTION CHECK)
+   =========================================================== */
+router.get("/agent/:agentId", async (req, res) => {
+  try {
+    const { agentId } = req.params;
+    
+    // Check if agent exists and has valid subscription
+    const agent = await Agent.findById(agentId).select("subscription name email");
+    if (!agent) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
+    
+    // Check subscription status
+    const subscriptionValid = isSubscriptionValid(agent.subscription);
+    if (!subscriptionValid) {
+      return res.status(403).json({ 
+        error: "This agent's subscription has expired. Properties are not available.",
+        subscriptionExpired: true,
+        agentId: agent._id
+      });
+    }
+    
+    // Get active properties for this agent
+    const properties = await Property.find({
+      agent: agentId,
+      active: true
+    })
+    .populate("agent", "_id name email subscription")
+    .populate("owner", "_id name email")
+    .sort({ createdAt: -1 });
+    
+    res.json({
+      success: true,
+      agent: {
+        _id: agent._id,
+        name: agent.name,
+        email: agent.email,
+        subscriptionValid: subscriptionValid,
+        subscriptionExpires: agent.subscription?.expiresAt
+      },
+      properties: properties,
+      count: properties.length
+    });
+  } catch (err) {
+    console.error("Failed to load agent properties:", err);
+    res.status(500).json({ error: "Failed to load agent properties" });
+  }
+});
+
+/* ===========================================================
+   8️⃣ ADMIN: GET ALL PROPERTIES (INCLUDING EXPIRED SUBSCRIPTIONS)
+   =========================================================== */
+router.get("/admin/all", auth, async (req, res) => {
+  try {
+    if (!req.user.isAdmin) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+
+    const properties = await Property.find({})
+      .populate("agent", "_id name email subscription")
+      .populate("owner", "_id name email")
+      .sort({ createdAt: -1 });
+
+    // Add subscription status for each property
+    const enhancedProperties = properties.map(property => {
+      const propertyObj = property.toObject();
+      
+      if (property.agent) {
+        propertyObj.agentSubscriptionValid = isSubscriptionValid(property.agent.subscription);
+        propertyObj.agentSubscriptionExpires = property.agent.subscription?.expiresAt;
+      } else {
+        propertyObj.agentSubscriptionValid = true;
+      }
+      
+      return propertyObj;
+    });
+
+    res.json(enhancedProperties);
+  } catch (err) {
+    console.error("Admin properties error:", err);
+    res.status(500).json({ error: "Failed to load properties" });
+  }
+});
+
+/* ===========================================================
+   9️⃣ FILTERS & SUGGESTIONS
    =========================================================== */
 router.get("/filters/cities", async (req, res) => {
   try {
-    const cities = await Property.distinct("city");
-    res.json(cities.filter((c) => c && c.trim() !== ""));
+    // Only include cities from properties with valid agent subscriptions
+    const properties = await Property.find({ active: true })
+      .populate({
+        path: "agent",
+        match: {
+          "subscription.active": true,
+          "subscription.expiresAt": { $gte: new Date() }
+        },
+        select: "_id"
+      });
+    
+    // Filter properties with valid agents
+    const validProperties = properties.filter(p => p.agent);
+    
+    // Extract unique cities
+    const cities = [...new Set(validProperties.map(p => p.city).filter(c => c && c.trim() !== ""))];
+    
+    res.json(cities);
   } catch (err) {
     res.status(500).json({ error: "Failed to load cities" });
   }
@@ -357,8 +620,28 @@ router.get("/filters/areas", async (req, res) => {
   try {
     const { city } = req.query;
     if (!city) return res.json([]);
-    const areas = await Property.distinct("areaName", { city });
-    res.json(areas.filter((a) => a && a.trim() !== ""));
+    
+    // Only include areas from properties with valid agent subscriptions
+    const properties = await Property.find({ 
+      city: { $regex: city, $options: "i" },
+      active: true 
+    })
+    .populate({
+      path: "agent",
+      match: {
+        "subscription.active": true,
+        "subscription.expiresAt": { $gte: new Date() }
+      },
+      select: "_id"
+    });
+    
+    // Filter properties with valid agents
+    const validProperties = properties.filter(p => p.agent);
+    
+    // Extract unique areas
+    const areas = [...new Set(validProperties.map(p => p.areaName).filter(a => a && a.trim() !== ""))];
+    
+    res.json(areas);
   } catch (err) {
     res.status(500).json({ error: "Failed to load areas" });
   }
@@ -371,23 +654,31 @@ router.get("/filters/suggestions", async (req, res) => {
 
     const regex = new RegExp(q, "i");
 
-    const results = await Property.find(
-      {
-        $or: [
-          { city: regex },
-          { areaName: regex },
-          { title: regex },
-          { projectName: regex },
-        ],
-        active: { $ne: false },
+    // Get properties with valid agent subscriptions
+    const properties = await Property.find({
+      $or: [
+        { city: regex },
+        { areaName: regex },
+        { title: regex },
+        { projectName: regex },
+      ],
+      active: true
+    })
+    .populate({
+      path: "agent",
+      match: {
+        "subscription.active": true,
+        "subscription.expiresAt": { $gte: new Date() }
       },
-      { city: 1, areaName: 1, title: 1, projectName: 1 }
-    )
-      .limit(20);
+      select: "_id"
+    })
+    .limit(20);
 
+    // Filter properties with valid agents
+    const validProperties = properties.filter(p => p.agent);
+    
     const suggestions = [];
-
-    results.forEach((p) => {
+    validProperties.forEach((p) => {
       if (p.city) suggestions.push({ type: "city", value: p.city });
       if (p.areaName) suggestions.push({ type: "area", value: p.areaName });
       if (p.title) suggestions.push({ type: "project", value: p.title });
@@ -395,12 +686,64 @@ router.get("/filters/suggestions", async (req, res) => {
     });
 
     // Remove duplicates
-    const unique = Array.from(new Set(suggestions.map(JSON.stringify))).map(JSON.parse);
+    const unique = Array.from(new Set(suggestions.map(s => JSON.stringify(s))))
+      .map(s => JSON.parse(s));
 
     res.json(unique);
   } catch (err) {
     console.error("Suggestion failed:", err);
     res.status(500).json({ error: "Suggestion failed" });
+  }
+});
+
+/* ===========================================================
+   🔟 GET SUBSCRIPTION STATUS FOR CURRENT USER
+   =========================================================== */
+router.get("/user/subscription-status", auth, async (req, res) => {
+  try {
+    if (!req.user.isAgent) {
+      return res.json({
+        isAgent: false,
+        canPost: false,
+        message: "Only agents can post properties"
+      });
+    }
+
+    const agent = await Agent.findById(req.user.id).select("subscription name email");
+    if (!agent) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
+
+    const subscriptionValid = isSubscriptionValid(agent.subscription);
+    const now = new Date();
+    const expiresAt = agent.subscription?.expiresAt ? new Date(agent.subscription.expiresAt) : null;
+    
+    let daysRemaining = null;
+    if (expiresAt && expiresAt > now) {
+      daysRemaining = Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24));
+    }
+
+    res.json({
+      isAgent: true,
+      canPost: subscriptionValid,
+      subscription: {
+        active: subscriptionValid,
+        expiresAt: expiresAt,
+        daysRemaining: daysRemaining,
+        lastPaidAt: agent.subscription?.lastPaidAt,
+        amount: agent.subscription?.amount || 1500,
+        currency: agent.subscription?.currency || "INR",
+        needsRenewal: !subscriptionValid || (daysRemaining !== null && daysRemaining <= 3)
+      },
+      agent: {
+        id: agent._id,
+        name: agent.name,
+        email: agent.email
+      }
+    });
+  } catch (err) {
+    console.error("Subscription status error:", err);
+    res.status(500).json({ error: "Failed to check subscription status" });
   }
 });
 

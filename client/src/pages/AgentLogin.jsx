@@ -10,37 +10,122 @@ export default function AgentLogin() {
 
   const nav = useNavigate();
 
+  const checkSubscriptionValidity = (subscription) => {
+    if (!subscription) return false;
+    
+    // Check if subscription exists and is active
+    const isActive = subscription.active === true || subscription.active === "true";
+    if (!isActive) return false;
+    
+    // Check expiration date
+    if (subscription.expiresAt) {
+      const expiresAt = new Date(subscription.expiresAt);
+      const now = new Date();
+      const isExpired = expiresAt < now;
+      return !isExpired;
+    }
+    
+    return true;
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setMsg("");
     setLoading(true);
 
     try {
-      const res = await api.post("/agents/login", { email, password });
+      // ✅ CLEAR ALL OLD TOKENS
+      localStorage.clear(); // Clear everything
+      delete api.defaults.headers.Authorization;
 
-      // Remove old tokens
-      localStorage.removeItem("token");
-      localStorage.removeItem("providerToken");
-      localStorage.removeItem("adminToken");
+      console.log("🔄 Sending login request for:", email);
+      const res = await api.post("/auth/agent-login", {
+        email: email.toLowerCase().trim(),
+        password: password.trim(),
+      });
 
-      // Save agent token
-      localStorage.setItem("agentToken", res.data.token);
+      console.log("✅ Login response:", res.data);
+      console.log("🔍 Response structure:", {
+        hasToken: !!res.data.token,
+        hasUser: !!res.data.user,
+        hasAgent: !!res.data.agent,
+        keys: Object.keys(res.data)
+      });
 
-      // Save user info
+      // ✅ FIX: Backend returns "user" not "agent"
+      if (!res.data.token || !res.data.user) {
+        console.error("❌ Missing token or user data in response");
+        setMsg("❌ Invalid server response format");
+        setLoading(false);
+        return;
+      }
+
+      const token = res.data.token;
+      const userData = res.data.user; // This is your agent data
+      
+      // Save tokens
+      localStorage.setItem("token", token);
+      localStorage.setItem("agentToken", token);
+      api.defaults.headers.Authorization = `Bearer ${token}`;
+
+      // ✅ SAVE USER INFO - use "user" from response
       localStorage.setItem(
         "user",
         JSON.stringify({
-          ...res.data.agent,
+          ...userData,
           isAgent: true,
           isAdmin: false,
           isService: false,
         })
       );
 
+      console.log("🔑 Saved user data:", {
+        id: userData._id,
+        name: userData.name,
+        email: userData.email,
+        subscription: userData.subscription
+      });
+
+      // ✅ CHECK SUBSCRIPTION VALIDITY
+      const subscription = userData?.subscription;
+      console.log("📅 Subscription data:", subscription);
+      
+      const hasValidSubscription = checkSubscriptionValidity(subscription);
+      console.log("✅ Subscription valid?", hasValidSubscription);
+      
       setLoading(false);
-      nav("/agent-dashboard");
+      
+      if (hasValidSubscription) {
+        // ✅ Valid subscription - go to dashboard
+        console.log("➡️ Redirecting to agent dashboard");
+        nav("/agent-dashboard");
+      } else {
+        // ❌ Invalid subscription - go to renewal page
+        console.log("➡️ Redirecting to subscription renewal");
+        nav(`/upgrade-subscription?email=${encodeURIComponent(email)}&type=agent&id=${userData._id}`, { 
+          state: { 
+            userType: "agent",
+            subscription: subscription,
+            redirectTo: "/agent-dashboard"
+          }
+        });
+      }
+
     } catch (err) {
-      setMsg("❌ " + (err.response?.data?.error || "Login failed"));
+      console.error("❌ Login error details:", {
+        message: err.message,
+        response: err.response?.data,
+        status: err.response?.status,
+      });
+      
+      if (err.response?.status === 400 || err.response?.status === 401) {
+        setMsg("❌ " + (err.response?.data?.error || "Invalid email or password"));
+      } else if (!err.response) {
+        setMsg("❌ Network error. Please check your connection.");
+      } else {
+        setMsg("❌ " + (err.response?.data?.error || "Login failed"));
+      }
+      
       setLoading(false);
     }
   };
@@ -58,6 +143,11 @@ export default function AgentLogin() {
             0% { transform: scale(0.97); }
             50% { transform: scale(1.02); }
             100% { transform: scale(1); }
+          }
+
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
           }
 
           .action-link {
@@ -92,6 +182,8 @@ export default function AgentLogin() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               style={styles.input}
+              placeholder=" "
+              disabled={loading}
             />
             <label style={styles.label}>Email</label>
           </div>
@@ -104,12 +196,24 @@ export default function AgentLogin() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               style={styles.input}
+              placeholder=" "
+              disabled={loading}
             />
             <label style={styles.label}>Password</label>
           </div>
 
-          <button disabled={loading} style={styles.button}>
-            {loading ? "Logging in..." : "Login"}
+          <button 
+            disabled={loading} 
+            style={styles.button}
+            type="submit"
+          >
+            {loading ? (
+              <>
+                <span style={styles.spinner}></span> Logging in...
+              </>
+            ) : (
+              "Login"
+            )}
           </button>
         </form>
 
@@ -124,7 +228,30 @@ export default function AgentLogin() {
           </Link>
         </div>
 
-        {msg && <p style={styles.error}>{msg}</p>}
+        {msg && (
+          <div style={{
+            ...styles.errorMessage,
+            background: msg.includes("❌") ? "rgba(255, 0, 0, 0.1)" : "rgba(0, 255, 0, 0.1)",
+            border: msg.includes("❌") ? "1px solid rgba(255, 0, 0, 0.3)" : "1px solid rgba(0, 255, 0, 0.3)"
+          }}>
+            <p style={{
+              ...styles.error,
+              color: msg.includes("❌") ? "#ff6b6b" : "#10b981"
+            }}>{msg}</p>
+          </div>
+        )}
+
+        {/* Debug Info (Only in development) */}
+        {process.env.NODE_ENV === 'development' && (
+          <div style={styles.debugInfo}>
+            <p style={styles.debugText}>
+              Testing with: marripatilokesh237@gmail.com
+            </p>
+            <p style={styles.debugText}>
+              Response format: token + user (not agent)
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -137,8 +264,7 @@ const styles = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    background:
-      "linear-gradient(135deg, #0c1b33, #1f3a93, #6a89cc)",
+    background: "linear-gradient(135deg, #0c1b33, #1f3a93, #6a89cc)",
     padding: 20,
   },
 
@@ -152,6 +278,7 @@ const styles = {
     boxShadow: "0 20px 40px rgba(0,0,0,0.25)",
     color: "#fff",
     animation: "fadeIn 0.9s ease-out",
+    position: "relative",
   },
 
   title: {
@@ -159,6 +286,7 @@ const styles = {
     marginBottom: 25,
     fontSize: 28,
     fontWeight: 800,
+    color: "#fff",
   },
 
   form: {
@@ -178,6 +306,7 @@ const styles = {
     color: "#ddd",
     fontSize: 15,
     pointerEvents: "none",
+    transition: "all 0.3s ease",
   },
 
   input: {
@@ -189,6 +318,7 @@ const styles = {
     fontSize: 16,
     color: "#fff",
     background: "rgba(255,255,255,0.12)",
+    transition: "all 0.3s ease",
   },
 
   button: {
@@ -202,6 +332,20 @@ const styles = {
     cursor: "pointer",
     marginTop: 10,
     animation: "pop 0.4s ease",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "10px",
+    transition: "all 0.3s ease",
+  },
+
+  spinner: {
+    width: "18px",
+    height: "18px",
+    border: "3px solid rgba(34, 34, 34, 0.3)",
+    borderTop: "3px solid #222",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite",
   },
 
   actionLinks: {
@@ -211,13 +355,63 @@ const styles = {
     fontSize: 14,
   },
 
-  error: {
+  errorMessage: {
     marginTop: 15,
-    color: "white",
-    background: "rgba(255,0,0,0.25)",
-    padding: "8px 12px",
+    padding: "12px 15px",
     borderRadius: 10,
+  },
+
+  error: {
+    margin: 0,
     textAlign: "center",
     fontWeight: 600,
+    fontSize: "14px",
+  },
+
+  debugInfo: {
+    marginTop: 15,
+    padding: "10px",
+    background: "rgba(0,0,0,0.2)",
+    borderRadius: "8px",
+    fontSize: "12px",
+  },
+
+  debugText: {
+    margin: "5px 0",
+    color: "#ddd",
+    fontFamily: "monospace",
   },
 };
+
+// Add CSS for input focus effects
+const styleTag = document.createElement('style');
+styleTag.innerHTML = `
+  .loginCard input:focus + label,
+  .loginCard input:not(:placeholder-shown) + label {
+    top: -20px;
+    left: 10px;
+    font-size: 12px;
+    color: #ffcc00;
+  }
+  
+  .loginCard input:focus {
+    background: rgba(255, 255, 255, 0.18);
+    box-shadow: 0 0 0 2px rgba(255, 204, 0, 0.3);
+  }
+  
+  .loginCard button:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 15px rgba(255, 204, 0, 0.3);
+  }
+  
+  .loginCard button:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+  
+  .loginCard input:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+`;
+document.head.appendChild(styleTag);

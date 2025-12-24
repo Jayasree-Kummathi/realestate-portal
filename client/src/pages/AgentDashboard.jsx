@@ -49,8 +49,9 @@ export default function AgentDashboard() {
       try {
         await checkSession();
 
-        const { data: me } = await api.get("/auth/me");
-        setAgent(me);
+      const { data: me } = await api.get("/agents/me");
+setAgent(me);
+
 
         const { data: props } = await api.get("/properties/agent/dashboard/list");
         setProperties(props);

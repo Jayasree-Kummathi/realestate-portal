@@ -1,74 +1,103 @@
-const express = require('express');
-const helmet = require('helmet');
-const morgan = require('morgan');
-const cors = require('cors');
-const rateLimiter = require('./middleware/rateLimiter');
-const errorHandler = require('./middleware/errorHandler');
+require("dotenv").config();
+const express = require("express");
+const helmet = require("helmet");
+const morgan = require("morgan");
+const cors = require("cors");
 const path = require("path");
 
-const authRoutes = require('./routes/auth');
-const propertyRoutes = require('./routes/properties');
-const paymentRoutes = require('./routes/payments');
-const adminRoutes = require('./routes/admin');
-const agentRoutes = require('./routes/agents');
-const enquiryRoutes = require('./routes/enquiries');
-const serviceProviderRoutes = require('./routes/serviceProviders');
-const serviceEnquiryRoutes = require("./routes/serviceEnquiry");  // ✅ FIX
-const marketingExecutiveRoutes = require("./routes/marketingExecutive"); 
+const rateLimiter = require("./middleware/rateLimiter");
+const errorHandler = require("./middleware/errorHandler");
+
+/* 🔐 AUTH & SUBSCRIPTION */
+const { auth } = require("./middleware/auth");
+const subscriptionGuard = require("./middleware/subscriptionGuard");
+
+/* 🔁 ROUTES */
+const authRoutes = require("./routes/auth");
+const propertyRoutes = require("./routes/properties");
+const paymentRoutes = require("./routes/payments");
+const adminRoutes = require("./routes/admin");
+const agentRoutes = require("./routes/agents");
+const enquiryRoutes = require("./routes/enquiries");
+const serviceProviderRoutes = require("./routes/serviceProviders");
+const serviceEnquiryRoutes = require("./routes/serviceEnquiry");
+const marketingExecutiveRoutes = require("./routes/marketingExecutive");
 const companyBanners = require("./routes/companyBanners");
+const serviceProviderRenewalRoutes = require("./routes/serviceProviderRenewal");
 
 const app = express();
 
-/* *****************************************
-   CORS
-***************************************** */
+/* =====================================================
+   🌍 CORS
+===================================================== */
 app.use(
   cors({
-    origin: true,      // ✅ allow any origin (DEV ONLY)
+    origin: true,
     credentials: true,
   })
 );
 
+/* =====================================================
+   📁 STATIC FILES
+===================================================== */
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "..", "uploads"))
+);
 
-/* *****************************************
-   STATIC UPLOADS
-***************************************** */
-app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
-
-/* *****************************************
-   SECURITY & LOGGING
-***************************************** */
+/* =====================================================
+   🛡 SECURITY & LOGGING
+===================================================== */
 app.use(helmet());
-app.use(morgan('dev'));
+app.use(morgan("dev"));
 app.use(rateLimiter);
 
-/* *****************************************
-   BODY PARSER
-***************************************** */
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+/* =====================================================
+   📦 BODY PARSER
+===================================================== */
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-/* *****************************************
-   ROUTES
-***************************************** */
-app.use('/api/payments', paymentRoutes);
-app.use('/api/auth', authRoutes);
-app.use('/api/properties', propertyRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/agents', agentRoutes);
-app.use('/api/enquiries', enquiryRoutes);
-app.use('/api/service-provider', serviceProviderRoutes);
+/* =====================================================
+   🔓 PUBLIC ROUTES (NO AUTH / NO SUBSCRIPTION)
+===================================================== */
+app.use("/api/auth", authRoutes);
+app.use("/api/payments", paymentRoutes);          // renew + verify
+app.use("/api/company-banners", companyBanners);
+
+/* 🔓 PUBLIC PROPERTY VIEW (IMPORTANT FIX) */
+app.use("/api/properties", propertyRoutes);       // 👈 PUBLIC GET routes only
+app.use("/api/service-provider/renewal", serviceProviderRenewalRoutes);
 
 
 
-// ✅ FIXED — Correct service enquiry API
-app.use('/api/service-enquiries', serviceEnquiryRoutes);
+/* =====================================================
+   🔐 AUTHENTICATED + SUBSCRIPTION REQUIRED
+===================================================== */
+app.use("/api/agents", auth, subscriptionGuard, agentRoutes);
+app.use("/api/enquiries", auth, subscriptionGuard, enquiryRoutes);
+app.use(
+  "/api/service-provider",
+  auth,
+  subscriptionGuard,
+  serviceProviderRoutes
+);
+app.use(
+  "/api/service-enquiries",
+  auth,
+  subscriptionGuard,
+  serviceEnquiryRoutes
+);
+
+/* =====================================================
+   👑 ADMIN & MARKETING (NO SUB BLOCK)
+===================================================== */
+app.use("/api/admin", auth, adminRoutes);
 app.use("/api/marketing-executive", marketingExecutiveRoutes);
 
-app.use("/api/company-banners", companyBanners);
-/* *****************************************
-   ERROR HANDLER
-***************************************** */
+/* =====================================================
+   ❌ ERROR HANDLER
+===================================================== */
 app.use(errorHandler);
 
 module.exports = app;

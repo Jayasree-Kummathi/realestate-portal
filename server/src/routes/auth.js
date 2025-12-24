@@ -7,10 +7,20 @@ const router = express.Router();
 
 const Agent = require("../models/Agent");
 const ServiceProvider = require("../models/ServiceProvider");
-const MarketingExecutive = require("../models/MarketingExecutive"); // ⭐ ADDED
+const MarketingExecutive = require("../models/MarketingExecutive");
 
 /* ==========================================================
-   1️⃣ AGENT LOGIN
+   🔑 HELPER — SUBSCRIPTION CHECK
+========================================================== */
+function isSubscriptionValid(subscription) {
+  if (!subscription) return false;
+  if (!subscription.active) return false;
+  if (!subscription.expiresAt) return false;
+  return new Date(subscription.expiresAt) > new Date();
+}
+
+/* ==========================================================
+   1️⃣ AGENT LOGIN (SOFT SUBSCRIPTION BLOCK)
 ========================================================== */
 router.post("/agent-login", async (req, res) => {
   try {
@@ -21,6 +31,8 @@ router.post("/agent-login", async (req, res) => {
 
     const isMatch = await bcrypt.compare(password, agent.password);
     if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
+
+    const subscriptionValid = isSubscriptionValid(agent.subscription);
 
     const token = jwt.sign(
       { id: agent._id, role: "agent" },
@@ -36,13 +48,18 @@ router.post("/agent-login", async (req, res) => {
         email: agent.email,
         phone: agent.phone,
         agentId: agent.agentId,
+
         subscription: agent.subscription || { active: false },
+        subscriptionValid,
+
+        // ⭐ FRONTEND REDIRECT FLAG
+        mustRenewSubscription: !subscriptionValid,
 
         isAgent: true,
         isAdmin: false,
         isService: false,
-        isMarketing: false
-      }
+        isMarketing: false,
+      },
     });
   } catch (err) {
     console.error("Agent login error:", err);
@@ -50,9 +67,8 @@ router.post("/agent-login", async (req, res) => {
   }
 });
 
-
 /* ==========================================================
-   2️⃣ SERVICE PROVIDER LOGIN
+   2️⃣ SERVICE PROVIDER LOGIN (SOFT SUBSCRIPTION BLOCK)
 ========================================================== */
 router.post("/service-provider-login", async (req, res) => {
   try {
@@ -63,6 +79,8 @@ router.post("/service-provider-login", async (req, res) => {
 
     const isMatch = await bcrypt.compare(password, sp.password);
     if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
+
+    const subscriptionValid = isSubscriptionValid(sp.subscription);
 
     const token = jwt.sign(
       { id: sp._id, role: "service" },
@@ -77,11 +95,17 @@ router.post("/service-provider-login", async (req, res) => {
         name: sp.name,
         email: sp.email,
 
+        subscription: sp.subscription || { active: false },
+        subscriptionValid,
+
+        // ⭐ FRONTEND REDIRECT FLAG
+        mustRenewSubscription: !subscriptionValid,
+
         isService: true,
         isAgent: false,
         isAdmin: false,
-        isMarketing: false
-      }
+        isMarketing: false,
+      },
     });
   } catch (err) {
     console.error("Service provider login error:", err);
@@ -89,9 +113,8 @@ router.post("/service-provider-login", async (req, res) => {
   }
 });
 
-
 /* ==========================================================
-   3️⃣ ADMIN LOGIN
+   3️⃣ ADMIN LOGIN (NO SUBSCRIPTION)
 ========================================================== */
 router.post("/admin-login", async (req, res) => {
   try {
@@ -120,8 +143,8 @@ router.post("/admin-login", async (req, res) => {
         isAdmin: true,
         isAgent: false,
         isService: false,
-        isMarketing: false
-      }
+        isMarketing: false,
+      },
     });
   } catch (err) {
     console.error("Admin login error:", err);
@@ -129,12 +152,8 @@ router.post("/admin-login", async (req, res) => {
   }
 });
 
-
 /* ==========================================================
-   4️⃣ MARKETING EXECUTIVE LOGIN (ADDED)
-========================================================== */
-/* ==========================================================
-   4️⃣ MARKETING EXECUTIVE LOGIN (FIXED)
+   4️⃣ MARKETING EXECUTIVE LOGIN (NO SUBSCRIPTION)
 ========================================================== */
 router.post("/marketing-executive/login", async (req, res) => {
   try {
@@ -146,12 +165,11 @@ router.post("/marketing-executive/login", async (req, res) => {
     const isMatch = await bcrypt.compare(password, exec.password);
     if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
 
-    // ⭐ FIX: TOKEN MUST INCLUDE MEID + correct role
     const token = jwt.sign(
       {
         id: exec._id,
         role: "marketingExecutive",
-        meid: exec.meid,     // <–– Added
+        meid: exec.meid,
         email: exec.email,
       },
       process.env.JWT_SECRET,
@@ -159,16 +177,14 @@ router.post("/marketing-executive/login", async (req, res) => {
     );
 
     return res.json({ token, exec });
-
   } catch (err) {
     console.error("ME login error:", err);
     res.status(500).json({ error: "Server error during ME login" });
   }
 });
 
-
 /* ==========================================================
-   UNIVERSAL /me (Admin + Agent + Service Provider + ME)
+   UNIVERSAL /me (WITH SUBSCRIPTION STATUS)
 ========================================================== */
 router.get("/me", async (req, res) => {
   try {
@@ -187,7 +203,7 @@ router.get("/me", async (req, res) => {
         isAgent: false,
         isService: false,
         isMarketing: false,
-        subscription: { active: true },
+        subscriptionValid: true,
       });
     }
 
@@ -198,6 +214,8 @@ router.get("/me", async (req, res) => {
 
       return res.json({
         ...agent.toObject(),
+        subscriptionValid: isSubscriptionValid(agent.subscription),
+        mustRenewSubscription: !isSubscriptionValid(agent.subscription),
         isAdmin: false,
         isAgent: true,
         isService: false,
@@ -212,6 +230,8 @@ router.get("/me", async (req, res) => {
 
       return res.json({
         ...sp.toObject(),
+        subscriptionValid: isSubscriptionValid(sp.subscription),
+        mustRenewSubscription: !isSubscriptionValid(sp.subscription),
         isAdmin: false,
         isAgent: false,
         isService: true,
@@ -219,7 +239,7 @@ router.get("/me", async (req, res) => {
       });
     }
 
-    /* ----- MARKETING EXECUTIVE (ADDED) ----- */
+    /* ----- MARKETING EXECUTIVE ----- */
     if (decoded.role === "marketingExecutive") {
       const exec = await MarketingExecutive.findById(decoded.id).select("-password");
       if (!exec) return res.status(404).json({ error: "Marketing Executive not found" });
@@ -234,7 +254,6 @@ router.get("/me", async (req, res) => {
     }
 
     return res.status(401).json({ error: "Unknown role type" });
-
   } catch (err) {
     console.error("Auth me error:", err);
     res.status(401).json({ error: "Invalid token" });

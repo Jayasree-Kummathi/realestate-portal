@@ -621,9 +621,118 @@ async function sendPropertyEnquiryEmail({
   });
 }
 
+
+/* =========================================================
+   🔔 SUBSCRIPTION REMINDER EMAIL
+========================================================= */
+async function sendSubscriptionReminderEmail({
+  to,
+  name,
+  role,
+  daysLeft,
+}) {
+  const isExpired = daysLeft <= 0;
+
+  const subject = isExpired
+    ? "❌ Your RealEstate24X7 subscription has expired"
+    : `⏰ Subscription expires in ${daysLeft} day(s)`;
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Subscription Reminder</title>
+</head>
+<body style="margin:0;padding:0;font-family:Segoe UI,Arial;background:#f4f6f8;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;">
+    <tr>
+      <td align="center">
+        <table width="100%" style="max-width:600px;background:#fff;border-radius:10px;overflow:hidden;">
+          
+          <tr>
+            <td style="background:#1e293b;color:#fff;padding:20px;text-align:center;">
+              <h2 style="margin:0;">RealEstate24X7</h2>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:30px;color:#333;">
+              <p>Hello <b>${name || "User"}</b>,</p>
+
+              ${
+                isExpired
+                  ? `
+                <p style="color:#dc2626;font-weight:600;">
+                  ❌ Your monthly subscription has expired.
+                </p>
+                <p>
+                  Your login access and listings have been temporarily blocked.
+                </p>
+                `
+                  : `
+                <p style="color:#ca8a04;font-weight:600;">
+                  ⏰ Your subscription will expire in ${daysLeft} day(s).
+                </p>
+                <p>
+                  Please renew your subscription to avoid service interruption.
+                </p>
+                `
+              }
+
+              <p><b>Plan:</b> ₹1500 / month</p>
+              <p><b>Account Type:</b> ${
+                role === "agent"
+                  ? "Property Dealer"
+                  : "Service Provider"
+              }</p>
+
+              <div style="text-align:center;margin:30px 0;">
+                <a href="${process.env.CLIENT_URL}/subscription-renew?source=email"
+                   style="
+                     background:#4f46e5;
+                     color:#fff;
+                     padding:14px 28px;
+                     border-radius:8px;
+                     text-decoration:none;
+                     font-weight:600;
+                   ">
+                  🔄 Renew Subscription
+                </a>
+              </div>
+
+              <p style="font-size:13px;color:#666;">
+                If you have already renewed, please ignore this email.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background:#f1f5f9;text-align:center;padding:15px;font-size:12px;color:#666;">
+              © ${new Date().getFullYear()} RealEstate24X7
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+  `;
+
+  return sendMail({
+    to,
+    subject,
+    html,
+  });
+}
+
 module.exports = {
+  sendMail, 
   enquiryEmailTemplate,
   sendWelcomeEmail,
   sendServiceEnquiryEmail,
   sendPropertyEnquiryEmail,
+  sendSubscriptionReminderEmail,
 };

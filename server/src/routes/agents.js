@@ -1,4 +1,6 @@
 const express = require("express");
+const mongoose = require("mongoose");
+const Transaction = require("../models/Transaction");
 const jwt = require("jsonwebtoken");
 const path = require("path");
 const multer = require("multer");
@@ -9,6 +11,8 @@ const Enquiry = require("../models/Enquiry");
 const ServiceProvider = require("../models/ServiceProvider");
 const crypto = require("crypto");
 const sendMail = require("../utils/sendMail");
+const Cashfree = require("../utils/cashfree");
+
 
 
 const router = express.Router();
@@ -113,6 +117,9 @@ router.post("/register", upload.single("voterIdFile"), async (req, res) => {
 /* ===========================================================
    🟢 LOGIN AGENT
    =========================================================== */
+/* ===========================================================
+   🟢 LOGIN AGENT (UPDATED with Subscription Check)
+   =========================================================== */
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -121,16 +128,68 @@ router.post("/login", async (req, res) => {
     if (!agent) return res.status(400).json({ error: "Invalid credentials" });
 
     const match = await agent.comparePassword(password);
-    if (!match)
-      return res.status(400).json({ error: "Invalid credentials" });
+    if (!match) return res.status(400).json({ error: "Invalid credentials" });
 
+    // ✅ Ensure subscription exists
+    if (!agent.subscription || Object.keys(agent.subscription).length === 0) {
+      console.log(`⚠️ Agent ${agent._id} has no subscription, creating default...`);
+      
+      agent.subscription = {
+        active: false,
+        expiresAt: null,
+        lastPaidAt: null,
+        paymentGateway: null,
+        amount: 2000,
+        currency: "INR",
+        needsRenewal: true
+      };
+      
+      await agent.save();
+    }
+
+    // ✅ Check if subscription is active
+    const now = new Date();
+    const expiresAt = agent.subscription?.expiresAt ? new Date(agent.subscription.expiresAt) : null;
+    const isActive = agent.subscription?.active && expiresAt && expiresAt > now;
+    
+    // ✅ If subscription is NOT active/expired
+    if (!isActive) {
+      // Calculate how many days expired (if applicable)
+      const daysExpired = expiresAt ? Math.floor((now - expiresAt) / (1000 * 60 * 60 * 24)) : 999;
+      
+      return res.status(403).json({
+        success: false,
+        error: "SUBSCRIPTION_EXPIRED",
+        message: "Your subscription has expired. Please renew to continue.",
+        data: {
+          userId: agent._id,
+          email: agent.email,
+          name: agent.name,
+          agentId: agent.agentId,
+          userType: "agent",
+          daysExpired: daysExpired,
+          expiresAt: expiresAt,
+          redirectTo: "/renew" // Frontend renewal page
+        }
+      });
+    }
+
+    // ✅ Subscription is ACTIVE - Generate token
     const token = jwt.sign(
-      { id: agent._id, role: "agent" },
+      { 
+        id: agent._id, 
+        role: "agent",
+        email: agent.email,
+        name: agent.name,
+        subscription: agent.subscription,
+        subscriptionValid: true
+      },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
 
     res.json({
+      success: true,
       token,
       agent: {
         _id: agent._id,
@@ -140,10 +199,170 @@ router.post("/login", async (req, res) => {
         phone: agent.phone,
         commissionPercent: agent.commissionPercent,
         subscription: agent.subscription,
+        subscriptionActive: true
       },
     });
   } catch (err) {
-    res.status(500).json({ error: "Login error" });
+    console.error("Agent login error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: "Login error" 
+    });
+  }
+});
+/* ===========================================================
+   🟢 GET LOGGED-IN AGENT (SAFE)
+=========================================================== */
+router.get("/me", auth, async (req, res) => {
+  try {
+    if (req.user.role !== "agent") {
+      return res.status(403).json({ error: "Agent access only" });
+    }
+
+    // ADD .lean() to get fresh data from DB (not cached)
+    const agent = await Agent.findById(req.user.id)
+      .select("-password")
+      .lean(); // ⬅️ CRITICAL: Get fresh data
+    
+    if (!agent) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
+
+    // MANUALLY ensure expiresAt exists if paidAt exists
+    if (agent.subscription && agent.subscription.paidAt && !agent.subscription.expiresAt) {
+      const paidAt = new Date(agent.subscription.paidAt);
+      const expiresAt = new Date(paidAt);
+      expiresAt.setMonth(expiresAt.getMonth() + 1); // Add 30 days
+      agent.subscription.expiresAt = expiresAt.toISOString();
+      
+      // Also update in database for next time
+      await Agent.findByIdAndUpdate(
+        req.user.id,
+        { "subscription.expiresAt": expiresAt }
+      );
+    }
+
+    console.log("=== DEBUG AGENT ME AFTER FIX ===");
+    console.log("expiresAt exists?", !!agent.subscription?.expiresAt);
+    console.log("expiresAt value:", agent.subscription?.expiresAt);
+    console.log("======================");
+    
+    res.json(agent);
+  } catch (err) {
+    console.error("GET /agents/me error:", err);
+    res.status(500).json({ error: "Failed to load agent profile" });
+  }
+});
+
+/* ===========================================================
+   📊 GET AGENT SUBSCRIPTION STATUS
+   =========================================================== */
+router.get("/subscription-status", auth, async (req, res) => {
+  try {
+    console.log("📊 Subscription status request from:", req.user.id);
+    
+    // Verify user is an agent
+    if (req.user.role !== "agent") {
+      console.log("❌ Not an agent, role:", req.user.role);
+      return res.status(403).json({ 
+        success: false, 
+        error: "Access denied. Agent only." 
+      });
+    }
+
+    // Find agent
+    const agent = await Agent.findById(req.user.id)
+      .select("subscription name email agentId phone createdAt");
+    
+    if (!agent) {
+      console.log("❌ Agent not found:", req.user.id);
+      return res.status(404).json({ 
+        success: false, 
+        error: "Agent not found" 
+      });
+    }
+
+    // Ensure subscription exists
+    if (!agent.subscription || Object.keys(agent.subscription).length === 0) {
+      console.log("⚠️ No subscription found for agent:", agent.email);
+      agent.subscription = {
+        active: false,
+        expiresAt: null,
+        lastPaidAt: null,
+        paymentGateway: null,
+        amount: 2000,
+        currency: "INR",
+        needsRenewal: true
+      };
+      await agent.save();
+    }
+
+    // Calculate subscription status
+    const subscription = agent.subscription;
+    const now = new Date();
+    const expiresAt = subscription.expiresAt ? new Date(subscription.expiresAt) : null;
+    
+    // Check if subscription is active
+    const isActive = subscription.active && expiresAt && expiresAt > now;
+    
+    // Calculate days remaining/expired
+    let daysRemaining = 0;
+    let daysExpired = 0;
+    
+    if (expiresAt) {
+      const diffDays = Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24));
+      if (diffDays > 0) {
+        daysRemaining = diffDays;
+      } else {
+        daysExpired = Math.abs(diffDays);
+      }
+    }
+
+    // Check if renewal is needed
+    const needsRenewal = !isActive || daysRemaining <= 7;
+
+    // Prepare response
+    const subscriptionStatus = {
+      active: isActive,
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
+      daysRemaining,
+      daysExpired,
+      needsRenewal,
+      lastPaidAt: subscription.lastPaidAt || null,
+      paymentGateway: subscription.paymentGateway || null,
+      amount: subscription.amount || 2000,
+      currency: subscription.currency || "INR",
+      planType: subscription.planType || "basic",
+      paymentStatus: subscription.paymentStatus || "pending"
+    };
+
+    console.log("✅ Subscription status for", agent.email, ":", {
+      active: isActive,
+      daysRemaining,
+      expiresAt: expiresAt?.toISOString()
+    });
+
+    // Send response
+    res.json({
+      success: true,
+      agent: {
+        id: agent._id,
+        name: agent.name,
+        email: agent.email,
+        agentId: agent.agentId,
+        phone: agent.phone,
+        createdAt: agent.createdAt
+      },
+      subscription: subscriptionStatus,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (err) {
+    console.error("❌ Subscription status error:", err);
+    res.status(500).json({ 
+      success: false, 
+      error: "Failed to get subscription status" 
+    });
   }
 });
 /* ===========================================================
@@ -300,20 +519,57 @@ router.get("/:id/enquiries", auth, async (req, res) => {
 /* ===========================================================
    🟢 GET SINGLE AGENT
    =========================================================== */
+/* ===========================================================
+   🟢 GET SINGLE AGENT (WITH FIX)
+   =========================================================== */
 router.get("/:id", auth, async (req, res) => {
   try {
+    const agentId = req.params.id;
+    
+    // ✅ EARLY VALIDATION - Check for undefined/null
+    if (!agentId || agentId === "undefined" || agentId === "null") {
+      console.error("Invalid agent ID requested:", agentId);
+      return res.status(400).json({ 
+        error: "Valid Agent ID is required",
+        code: "INVALID_AGENT_ID"
+      });
+    }
+    
+    // ✅ Validate MongoDB ObjectId format (if not "me")
+    if (agentId !== "me" && !mongoose.isValidObjectId(agentId)) {
+      return res.status(400).json({ 
+        error: "Invalid Agent ID format",
+        code: "INVALID_ID_FORMAT"
+      });
+    }
+    
+    // ✅ Handle "me" or "self" requests
+    if (agentId === "me" || agentId === "self") {
+      if (req.user.role !== "agent") {
+        return res.status(403).json({ error: "Agent access only" });
+      }
+      
+      const agent = await Agent.findById(req.user.id);
+      if (!agent) {
+        return res.status(404).json({ error: "Agent not found" });
+      }
+      return res.json(agent);
+    }
+    
+    // ✅ Original access control logic
     const uid = req.user._id || req.user.id;
-
-    if (req.user.role !== "admin" && uid !== req.params.id) {
+    
+    if (req.user.role !== "admin" && uid !== agentId) {
       return res.status(403).json({ error: "Access denied" });
     }
-
-    const agent = await Agent.findById(req.params.id);
+    
+    const agent = await Agent.findById(agentId);
     if (!agent) return res.status(404).json({ error: "Agent not found" });
-
+    
     res.json(agent);
   } catch (err) {
-    res.status(500).json({ error: "Error fetching agent" });
+    console.error("GET agent error:", err);
+    res.status(500).json({ error: "Error loading agent" });
   }
 });
 /* ===========================================================
@@ -372,5 +628,392 @@ router.put("/agents/:id", auth, async (req, res) => {
     res.status(500).json({ error: "Update failed" });
   }
 });
+// Add these routes to your existing agent routes
+
+// Agent Email Verification Endpoint
+/* ===========================================================
+   🔓 STANDALONE RENEWAL ROUTES (NO AUTH REQUIRED)
+   =========================================================== */
+
+// 1. Verify Email for Renewal (Public)
+router.post("/renewal/verify-email", async (req, res) => {
+  try {
+    const { email, userType } = req.body;
+    
+    console.log("🔍 Renewal email verification:", { email, userType });
+    
+    if (!email || !userType) {
+      return res.status(400).json({
+        success: false,
+        error: "Email and user type are required"
+      });
+    }
+    
+    // Only handle agent renewals here
+    if (userType !== "agent") {
+      return res.status(400).json({
+        success: false,
+        error: "This endpoint is for agents only"
+      });
+    }
+    
+    const agent = await Agent.findOne({ email: email.toLowerCase() });
+    
+    if (!agent) {
+      return res.status(404).json({
+        success: false,
+        error: "Agent not found with this email"
+      });
+    }
+    
+    // Check subscription status
+    const subscription = agent.subscription || {};
+    const now = new Date();
+    const expiresAt = subscription.expiresAt ? new Date(subscription.expiresAt) : null;
+    const isActive = subscription.active && expiresAt && expiresAt > now;
+    
+    return res.json({
+      success: true,
+      user: {
+        id: agent._id,
+        agentId: agent.agentId,
+        name: agent.name,
+        email: agent.email,
+        phone: agent.phone
+      },
+      subscription: {
+        active: isActive,
+        expiresAt: expiresAt,
+        isExpired: !isActive
+      }
+    });
+    
+  } catch (error) {
+    console.error("Renewal email verification error:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Verification failed"
+    });
+  }
+});
+
+// 2. Create Renewal Order (Public)
+router.post("/renewal/create-order", async (req, res) => {
+  try {
+    const { userId, userType, email } = req.body;
+
+    // Validate input
+    if (!userId || userType !== "agent" || !email) {
+      return res.status(400).json({ 
+        error: "Invalid request. Required: userId, userType='agent', email" 
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: "Invalid email format" });
+    }
+
+    // Verify agent exists and email matches
+    const agent = await Agent.findById(userId);
+    if (!agent) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
+    
+    if (agent.email.toLowerCase() !== email.toLowerCase()) {
+      return res.status(403).json({ error: "Email verification failed" });
+    }
+
+    // Check if agent is already active (prevent duplicate renewals)
+    if (agent.subscriptionStatus === 'active' && 
+        agent.subscriptionExpiry > new Date()) {
+      return res.status(400).json({ 
+        error: "Agent subscription is already active" 
+      });
+    }
+
+    // Generate unique order ID
+    const orderId = `RENEW_AGENT_${userId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const amount = 2000;
+
+    // Validate and get frontend URL
+    const frontendUrl = process.env.CLIENT_URL;
+    if (!frontendUrl) {
+      console.error("❌ FRONTEND_URL environment variable not configured");
+      return res.status(500).json({ 
+        error: "Server configuration error" 
+      });
+    }
+
+    // Build return URL
+    const returnUrl = new URL('/renewal-success', frontendUrl);
+    returnUrl.searchParams.set('order_id', orderId);
+    returnUrl.searchParams.set('user_id', userId);
+    returnUrl.searchParams.set('timestamp', Date.now().toString());
+
+    console.log("🔁 Creating order for agent:", userId, "Return URL:", returnUrl.toString());
+
+    // Create payment order
+    const response = await Cashfree.PGCreateOrder("2023-08-01", {
+  order_id: orderId,
+  order_amount: amount,
+  order_currency: "INR",
+  customer_details: {
+    customer_id: userId,
+    customer_email: agent.email,
+    customer_phone: agent.phone || "9999999999",
+    customer_name: agent.name || "Agent",
+  },
+  order_meta: {
+    return_url: returnUrl.toString(), // ✅ ONLY THIS
+  },
+  order_note: `Renewal for agent: ${agent.name || userId}`,
+});
+
+
+    // Log the transaction in database
+    await Transaction.create({
+      orderId,
+      userId,
+      userType: 'agent',
+      amount,
+      status: 'initiated',
+      paymentSessionId: response.data.payment_session_id,
+      timestamp: new Date(),
+      metadata: {
+        agentEmail: agent.email,
+        agentName: agent.name,
+      }
+    });
+
+    // Update agent with pending renewal
+    agent.pendingRenewal = {
+      orderId,
+      amount,
+      initiatedAt: new Date()
+    };
+    await agent.save();
+
+    return res.json({
+      success: true,
+      orderId,
+      paymentSessionId: response.data.payment_session_id,
+      amount,
+      currency: "INR",
+      customerEmail: agent.email,
+      // Optional: Include Cashfree SDK configuration if needed
+      sdkConfig: {
+        env: process.env.CASHFREE_ENV || 'SANDBOX'
+      }
+    });
+
+  } catch (err) {
+    console.error("❌ Cashfree create order error:", err);
+    
+    // More specific error handling
+    if (err.code === 'ECONNREFUSED') {
+      return res.status(503).json({
+        success: false,
+        error: "Payment service temporarily unavailable"
+      });
+    }
+    
+    if (err.response?.status === 400) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid payment request parameters",
+        details: err.response.data?.message
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: "Failed to create payment order",
+      reference: `ERR_${Date.now()}` // For debugging
+    });
+  }
+});
+// 3. Verify Payment and Update Subscription (Public)
+router.post("/renewal/verify-payment", async (req, res) => {
+  try {
+    const { orderId, userId, userType } = req.body;
+
+    console.log("✅ Renewal payment verification:", { orderId, userId, userType });
+
+    /* ===============================
+       BASIC VALIDATION
+    =============================== */
+    if (!orderId || !userId || userType !== "agent") {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid request",
+      });
+    }
+
+    /* ===============================
+       ORDER OWNERSHIP CHECK
+    =============================== */
+    const orderParts = orderId.split("_");
+    if (orderParts.length < 4 || orderParts[0] !== "RENEW") {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid order ID format",
+      });
+    }
+
+    const orderUserId = orderParts[2];
+    if (orderUserId !== userId) {
+      return res.status(403).json({
+        success: false,
+        error: "Order does not belong to this user",
+      });
+    }
+
+    /* ===============================
+       FIND AGENT
+    =============================== */
+    const agent = await Agent.findById(userId);
+    if (!agent) {
+      return res.status(404).json({
+        success: false,
+        error: "Agent not found",
+      });
+    }
+
+    /* ===============================
+       VERIFY PAYMENT WITH CASHFREE
+    =============================== */
+    let paymentVerified = false;
+    let paymentData = null;
+
+    try {
+      const paymentResponse = await Cashfree.PGOrderPayments(
+        "2023-08-01",
+        orderId
+      );
+
+      if (Array.isArray(paymentResponse.data)) {
+        paymentData = paymentResponse.data.find(
+          (p) => p.payment_status === "SUCCESS"
+        );
+        if (paymentData) paymentVerified = true;
+      }
+    } catch (err) {
+      console.error("❌ Cashfree payment check failed:", err.message);
+    }
+
+    if (!paymentVerified) {
+      return res.status(400).json({
+        success: false,
+        error: "Payment not verified yet",
+      });
+    }
+
+    /* ===============================
+       CALCULATE NEW EXPIRY
+    =============================== */
+    const now = new Date();
+    const currentExpiry = agent.subscription?.expiresAt
+      ? new Date(agent.subscription.expiresAt)
+      : null;
+
+    const baseDate =
+      currentExpiry && currentExpiry > now ? currentExpiry : now;
+
+    const newExpiry = new Date(baseDate);
+    newExpiry.setMonth(newExpiry.getMonth() + 1); // 1-month renewal
+
+    /* ===============================
+       UPDATE SUBSCRIPTION
+    =============================== */
+    agent.subscription = {
+      ...agent.subscription,
+      active: true,
+      paidAt: now,
+      lastPaidAt: now,
+      expiresAt: newExpiry,
+      paymentGateway: "cashfree",
+      cashfreeOrderId: orderId,
+      renewalOrderId: orderId,
+      cashfreePaymentId: paymentData.cf_payment_id,
+      paymentStatus: "SUCCESS",
+      amount: paymentData.payment_amount,
+      currency: paymentData.payment_currency,
+      lastRenewalDate: now,
+    };
+
+    await agent.save();
+
+    console.log(
+      `✅ Agent ${agent.email} renewed till ${newExpiry.toISOString()}`
+    );
+
+    /* ===============================
+       SEND EMAIL (THIS WAS MISSING 🔥)
+    =============================== */
+   /* ===============================
+   SEND RENEWAL EMAIL (AGENT)
+=============================== */
+try {
+  const { sendMail } = require("../utils/emailTemplates");
+
+  await sendMail({
+    to: agent.email,
+    subject: "Agent Subscription Renewed Successfully",
+    html: `
+      <h2>Subscription Renewal Confirmation</h2>
+      <p>Dear ${agent.name},</p>
+
+      <p>Your <strong>Agent subscription</strong> has been renewed successfully 🎉</p>
+
+      <div style="background:#f0f9ff;padding:15px;border-radius:8px;margin:15px 0">
+        <p><strong>Order ID:</strong> ${orderId}</p>
+        <p><strong>Payment ID:</strong> ${paymentData.cf_payment_id}</p>
+        <p><strong>Amount Paid:</strong> ₹${paymentData.payment_amount}</p>
+        <p><strong>Renewal Date:</strong> ${new Date().toLocaleDateString()}</p>
+        <p><strong>Valid Until:</strong> ${newExpiry.toLocaleDateString()}</p>
+        <p><strong>Status:</strong> Active ✅</p>
+      </div>
+
+      <p>You can now continue posting and managing your properties.</p>
+
+      <p>
+        Regards,<br/>
+        <strong>Real Estate Portal Team</strong>
+      </p>
+    `,
+  });
+
+  console.log("📧 Agent renewal email sent");
+} catch (mailErr) {
+  console.warn("⚠️ Agent renewal email failed:", mailErr.message);
+}
+
+
+    /* ===============================
+       RESPONSE
+    =============================== */
+    return res.json({
+      success: true,
+      message: "Subscription renewed successfully",
+      subscription: {
+        active: true,
+        expiresAt: newExpiry,
+        daysRemaining: Math.ceil(
+          (newExpiry - now) / (1000 * 60 * 60 * 24)
+        ),
+      },
+    });
+
+  } catch (error) {
+    console.error("❌ Renewal payment verification error:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Payment verification failed",
+    });
+  }
+});
+
 
 module.exports = router;

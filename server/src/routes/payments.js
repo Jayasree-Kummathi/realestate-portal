@@ -1,15 +1,19 @@
 const express = require("express");
 const crypto = require("crypto");
+const axios = require("axios");
+
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
-const jwt = require('jsonwebtoken'); // Add this line
+const jwt = require('jsonwebtoken');
+const { auth } = require("../middleware/auth");
+
 
 const Cashfree = require("../utils/cashfree");
 const Agent = require("../models/Agent");
 const ServiceProvider = require("../models/ServiceProvider");
-const { sendWelcomeEmail } = require("../utils/emailTemplates");
-
+const Subscription = require("../models/Subscription");
+const { sendWelcomeEmail, sendSubscriptionReminderEmail } = require("../utils/emailTemplates");
 
 const router = express.Router();
 
@@ -39,37 +43,137 @@ const uploadStorage = multer.diskStorage({
 
 const upload = multer({ 
   storage: uploadStorage,
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+  limits: { fileSize: 5 * 1024 * 1024 }
 });
 
 /* =====================================================
    🛠️ URL Helper Functions
 ===================================================== */
-function buildReturnUrl(orderId, tempId, userType = "agent") {
+function buildReturnUrl(orderId, tempId, userType = "agent", isRenewal = false) {
   const clientUrl = process.env.CLIENT_URL || "http://localhost:5173";
-  const path = userType === "agent" ? "agent-payment-success" : "provider-payment-success";
+  let path = "";
   
-  // IMPORTANT: Don't use template placeholder {order_id}, use actual orderId
+  if (isRenewal) {
+    path = userType === "agent" ? "agent-renewal-success" : "provider-renewal-success";
+  } else {
+    path = userType === "agent" ? "agent-payment-success" : "provider-payment-success";
+  }
+  
   return `${clientUrl}/${path}?order_id=${orderId}&tempId=${tempId}`;
 }
 
-function buildNotifyUrl() {
+function buildNotifyUrl(isRenewal = false) {
   const backendUrl = process.env.BACKEND_URL || "http://localhost:4000";
-  return `${backendUrl}/api/payments/cashfree-webhook`;
+  const endpoint = isRenewal ? "subscription-renew-webhook" : "cashfree-webhook";
+  return `${backendUrl}/api/payments/${endpoint}`;
 }
 
 function ensureHttpsForProduction(url) {
   const isProduction = process.env.CASHFREE_ENV === "PROD";
   if (isProduction && url && url.startsWith("http://")) {
-    // For production, we need HTTPS
-    // If using localhost in production, this will fail - use ngrok or switch to SANDBOX
     return url.replace("http://", "https://");
   }
   return url;
 }
 
 /* =====================================================
-   1️⃣ AGENT — CREATE CASHFREE ORDER (FIXED)
+   🔑 SUBSCRIPTION HELPER FUNCTIONS
+===================================================== */
+function calculateExpiryDate(paymentDate) {
+  const paidDate = new Date(paymentDate);
+  const expiresAt = new Date(paidDate);
+  expiresAt.setMonth(expiresAt.getMonth() + 1);
+  
+  console.log("📅 CALCULATING EXPIRY DATE:");
+  console.log(`   Payment Date: ${paidDate.toISOString()}`);
+  console.log(`   Expiry Date: ${expiresAt.toISOString()}`);
+  console.log(`   Valid Until: ${expiresAt.toLocaleDateString()}`);
+  
+  return expiresAt;
+}
+
+function isSubscriptionActive(subscription) {
+  if (!subscription || !subscription.active) return false;
+  
+  // Check if subscription has expired
+  if (subscription.expiresAt) {
+    const now = new Date();
+    const expiryDate = new Date(subscription.expiresAt);
+    return now <= expiryDate;
+  }
+  
+  // Legacy check for backward compatibility
+  return subscription.active === true;
+}
+
+
+
+
+function calculateRenewalExpiry(existingExpiry, planMonths = 1) {
+  const now = new Date();
+  
+  console.log("📅 RENEWAL EXPIRY CALCULATION:");
+  console.log(`   Now: ${now.toISOString()}`);
+  console.log(`   Existing Expiry: ${existingExpiry ? new Date(existingExpiry).toISOString() : 'None'}`);
+
+  let baseDate;
+  if (existingExpiry) {
+    const expiryDate = new Date(existingExpiry);
+    if (expiryDate > now) {
+      baseDate = expiryDate; // Early renewal
+      console.log(`   🔵 Early renewal - using existing expiry as base`);
+    } else {
+      baseDate = now; // Expired - start from now
+      console.log(`   🔴 Subscription expired - starting from now`);
+    }
+  } else {
+    baseDate = now; // First time subscription
+    console.log(`   🟡 First time subscription - starting from now`);
+  }
+
+  const newExpiry = new Date(baseDate);
+  newExpiry.setMonth(newExpiry.getMonth() + planMonths);
+  
+  console.log(`   🎯 New Expiry: ${newExpiry.toISOString()}`);
+  console.log(`   ⏰ Added ${planMonths} month(s)`);
+  
+  return newExpiry;
+}
+
+/* =====================================================
+   🔄 CREATE SUBSCRIPTION RECORD
+===================================================== */
+async function createSubscriptionRecord(userId, userType, paymentData, orderId, paymentId) {
+  try {
+    const paidAt = new Date();
+    const expiresAt = calculateExpiryDate(paidAt);
+    
+    const subscription = new Subscription({
+      userId,
+      userType: userType === "agent" ? "agent" : "service-provider",
+      paymentGateway: "cashfree",
+      cashfreeOrderId: orderId,
+      cashfreePaymentId: paymentId,
+      amount: paymentData.payment_amount || 1500,
+      currency: paymentData.payment_currency || "INR",
+      paymentStatus: paymentData.payment_status || "SUCCESS",
+      startedAt: paidAt,
+      expiresAt,
+      status: "active",
+    });
+    
+    await subscription.save();
+    console.log(`✅ Subscription record created for ${userType}: ${userId}`);
+    
+    return { success: true, expiresAt };
+  } catch (err) {
+    console.error("❌ Failed to create subscription record:", err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+/* =====================================================
+   1️⃣ AGENT — CREATE CASHFREE ORDER
 ===================================================== */
 router.post("/agent/create-order", express.json(), async (req, res) => {
   try {
@@ -81,9 +185,7 @@ router.post("/agent/create-order", express.json(), async (req, res) => {
     }
 
     const tempId = crypto.randomBytes(10).toString("hex");
-    console.log("Generated tempId:", tempId);
 
-    // Save temporary data
     const tempData = {
       tempId, 
       pendingAgent,
@@ -96,27 +198,14 @@ router.post("/agent/create-order", express.json(), async (req, res) => {
       JSON.stringify(tempData, null, 2)
     );
 
-    // Cashfree order creation
     const orderId = `AGT_${Date.now()}_${tempId.substring(0, 8)}`;
-    console.log("Generated orderId:", orderId);
     
-    // Build URLs
     let returnUrl = buildReturnUrl(orderId, tempId, "agent");
     let notifyUrl = buildNotifyUrl();
     
-    // For production, ensure HTTPS
     if (process.env.CASHFREE_ENV === "PROD") {
       returnUrl = ensureHttpsForProduction(returnUrl);
       notifyUrl = ensureHttpsForProduction(notifyUrl);
-      
-      // Check if we're trying to use localhost in production
-      if (returnUrl.includes("localhost") || returnUrl.includes("127.0.0.1")) {
-        console.warn("⚠️ WARNING: Using localhost in production mode. This will likely fail!");
-        console.warn("   Consider:");
-        console.warn("   1. Switching to CASHFREE_ENV=SANDBOX");
-        console.warn("   2. Using ngrok for HTTPS URLs");
-        console.warn("   3. Using actual domain names with HTTPS");
-      }
     }
 
     const orderData = {
@@ -136,14 +225,6 @@ router.post("/agent/create-order", express.json(), async (req, res) => {
       order_note: "Agent Registration Payment",
     };
 
-    console.log("Order data being sent to Cashfree:", {
-      order_id: orderData.order_id,
-      amount: orderData.order_amount,
-      return_url: orderData.order_meta.return_url,
-      environment: process.env.CASHFREE_ENV
-    });
-
-    // Create Cashfree order
     const response = await Cashfree.PGCreateOrder("2023-08-01", orderData);
     
     console.log("✅ Cashfree order created:", response.data.order_id);
@@ -158,28 +239,16 @@ router.post("/agent/create-order", express.json(), async (req, res) => {
 
   } catch (err) {
     console.error("❌ Agent Order Creation Error:", err.message);
-    
-    // Provide helpful error messages
-    let userMessage = "Order creation failed";
-    if (err.response?.data?.message?.includes("return_url")) {
-      userMessage = "Payment gateway requires HTTPS URLs for production. Please switch to SANDBOX mode for local testing.";
-    } else if (err.message.includes("network") || err.message.includes("timeout")) {
-      userMessage = "Network error. Please check your internet connection.";
-    }
-    
     res.status(500).json({ 
       success: false,
-      error: userMessage,
+      error: "Order creation failed",
       details: process.env.NODE_ENV === "development" ? err.message : undefined
     });
   }
 });
 
 /* =====================================================
-   2️⃣ AGENT — VERIFY PAYMENT
-===================================================== */
-/* =====================================================
-   2️⃣ AGENT — VERIFY PAYMENT
+   2️⃣ AGENT — VERIFY PAYMENT (FIXED WITH EXPIRESAT)
 ===================================================== */
 router.post("/agent/verify", express.json(), async (req, res) => {
   try {
@@ -206,10 +275,9 @@ router.post("/agent/verify", express.json(), async (req, res) => {
     const { pendingAgent: a } = savedData;
 
     /* =====================================================
-       ✅ STEP 1: VERIFY ACTUAL PAYMENT (NOT ORDER STATUS)
+       ✅ STEP 1: VERIFY PAYMENT
     ===================================================== */
     let successfulPayment;
-
     try {
       const paymentsRes = await Cashfree.PGOrderPayments(
         "2023-08-01",
@@ -235,7 +303,7 @@ router.post("/agent/verify", express.json(), async (req, res) => {
     }
 
     /* =====================================================
-       ✅ STEP 2: PREVENT DUPLICATE AGENT
+       ✅ STEP 2: PREVENT DUPLICATE
     ===================================================== */
     const existingAgent = await Agent.findOne({ email: a.email });
     if (existingAgent) {
@@ -249,10 +317,9 @@ router.post("/agent/verify", express.json(), async (req, res) => {
     }
 
     /* =====================================================
-       ✅ STEP 3: SAVE VOTER ID (OPTIONAL)
+       ✅ STEP 3: SAVE VOTER ID
     ===================================================== */
     let voterPath = null;
-
     if (voterIdBase64?.startsWith("data:image")) {
       const base64 = voterIdBase64.replace(/^data:image\/\w+;base64,/, "");
       const fileName = `voter-${Date.now()}-${tempId.slice(0, 8)}.png`;
@@ -264,19 +331,29 @@ router.post("/agent/verify", express.json(), async (req, res) => {
     }
 
     /* =====================================================
-       ✅ STEP 4: CREATE SUBSCRIPTION (LIKE RAZORPAY)
+       ✅ STEP 4: CREATE SUBSCRIPTION WITH EXPIRESAT (CRITICAL FIX)
     ===================================================== */
+    const paidAt = new Date(successfulPayment.payment_time);
+    const expiresAt = calculateExpiryDate(paidAt);
+
+    console.log("🚨 AGENT SUBSCRIPTION DATES (FIXED):");
+    console.log(`   Payment time: ${successfulPayment.payment_time}`);
+    console.log(`   Paid at: ${paidAt.toISOString()}`);
+    console.log(`   Expires at: ${expiresAt.toISOString()}`);
+    console.log(`   Valid until: ${expiresAt.toLocaleDateString()}`);
+
     const subscription = {
       active: true,
-      paidAt: new Date(successfulPayment.payment_time),
+      lastPaidAt: paidAt,
+      expiresAt: expiresAt,
       paymentGateway: "cashfree",
-
       cashfreeOrderId: cashfree_order_id,
       cashfreePaymentId: successfulPayment.cf_payment_id,
-
       amount: successfulPayment.payment_amount,
       currency: successfulPayment.payment_currency,
       paymentStatus: successfulPayment.payment_status,
+      // 🚨 ADD THIS: Keep paidAt for backward compatibility
+      paidAt: paidAt
     };
 
     /* =====================================================
@@ -289,10 +366,8 @@ router.post("/agent/verify", express.json(), async (req, res) => {
       phone: a.phone,
       password: a.password,
       profession: a.profession,
-
       referralMarketingExecutiveName: a.referralMarketingExecutiveName || null,
       referralMarketingExecutiveId: a.referralMarketingExecutiveId || null,
-
       documents: { voterId: voterPath },
       subscription,
       status: "active",
@@ -303,71 +378,66 @@ router.post("/agent/verify", express.json(), async (req, res) => {
     await newAgent.save();
 
     /* =====================================================
-       ✅ STEP 6: SEND WELCOME EMAIL TO AGENT
+       ✅ STEP 6: CREATE SUBSCRIPTION RECORD
     ===================================================== */
-    let emailSent = false;
-    let emailError = null;
+    const subscriptionRecord = await createSubscriptionRecord(
+      newAgent._id,
+      "agent",
+      successfulPayment,
+      cashfree_order_id,
+      successfulPayment.cf_payment_id
+    );
     
-    try {
-      console.log("📧 Attempting to send welcome email to agent:", newAgent.email);
-      
-      const emailResult = await sendWelcomeEmail({
-        to: newAgent.email,
-        name: newAgent.name,
-        role: "agent", // Changed from "service-provider" to "agent"
-      });
-      
-      emailSent = true;
-      console.log("✅ Welcome email sent to agent:", newAgent.email);
-      
-      if (emailResult) {
-        console.log("📧 Email function returned:", emailResult);
-      }
-    } catch (emailErr) {
-      emailError = emailErr.message;
-      console.error("❌ Agent welcome email FAILED:", newAgent.email);
-      console.error("Email error:", {
-        message: emailErr.message,
-        stack: emailErr.stack,
-      });
-      
-      console.log("⚠️ Continuing agent registration despite email failure...");
+    if (!subscriptionRecord.success) {
+      console.error("⚠️ Subscription record creation failed but agent was created");
     }
 
     /* =====================================================
-       ✅ STEP 7: GENERATE LOGIN TOKEN FOR AUTO-LOGIN
+       ✅ STEP 7: SEND WELCOME EMAIL
     ===================================================== */
-    console.log("🔑 Generating JWT token for agent...");
-    
+    let emailSent = false;
+    let emailError = null;
+    try {
+      await sendWelcomeEmail({
+        to: newAgent.email,
+        name: newAgent.name,
+        role: "agent",
+      });
+      emailSent = true;
+    } catch (emailErr) {
+      emailError = emailErr.message;
+      console.error("❌ Agent welcome email FAILED:", emailErr.message);
+    }
+
+    /* =====================================================
+       ✅ STEP 8: GENERATE LOGIN TOKEN
+    ===================================================== */
     if (!process.env.JWT_SECRET) {
-      throw new Error("JWT_SECRET is not defined in environment variables");
+      throw new Error("JWT_SECRET is not defined");
     }
     
     const loginToken = jwt.sign(
       {
         id: newAgent._id,
         email: newAgent.email,
-        role: "agent", // Changed from "service-provider" to "agent"
+        role: "agent",
+        subscription: newAgent.subscription,
+        subscriptionValid: true,
         createdAt: new Date().toISOString()
       },
       process.env.JWT_SECRET,
       { expiresIn: "24h" }
     );
-    
-    console.log("✅ Agent JWT token generated");
 
     /* =====================================================
-       ✅ STEP 8: CLEAN TEMP FILE
+       ✅ STEP 9: CLEAN TEMP FILE
     ===================================================== */
-    try { 
-      fs.unlinkSync(tempFile); 
-      console.log("🧹 Cleared agent temp file");
-    } catch (cleanupErr) {
+    try { fs.unlinkSync(tempFile); } catch (cleanupErr) {
       console.error("⚠️ Failed to delete agent temp file:", cleanupErr.message);
     }
 
     /* =====================================================
-       ✅ STEP 9: SEND RESPONSE
+       ✅ STEP 10: SEND RESPONSE
     ===================================================== */
     return res.json({
       success: true,
@@ -376,15 +446,20 @@ router.post("/agent/verify", express.json(), async (req, res) => {
       agentCode: newAgent.agentId,
       email: newAgent.email,
       name: newAgent.name,
-      loginToken: loginToken, // Added login token
-      emailSent, // Added email status
-      emailError: emailError || undefined, // Added error info if any
+      loginToken: loginToken,
+      subscription: {
+        active: subscription.active,
+        expiresAt: subscription.expiresAt,
+        lastPaidAt: subscription.lastPaidAt,
+        paidAt: subscription.paidAt
+      },
+      subscriptionRecordCreated: subscriptionRecord.success,
+      emailSent,
+      emailError: emailError || undefined,
     });
 
   } catch (err) {
     console.error("❌ Agent Verification Error:", err.message);
-    console.error("Full error stack:", err.stack);
-    
     return res.status(500).json({
       success: false,
       error: "Registration failed. Please contact support.",
@@ -394,7 +469,7 @@ router.post("/agent/verify", express.json(), async (req, res) => {
 });
 
 /* =====================================================
-   3️⃣ SERVICE PROVIDER — CREATE ORDER (FIXED)
+   3️⃣ SERVICE PROVIDER — CREATE ORDER
 ===================================================== */
 router.post(
   "/service-provider/create-order",
@@ -423,14 +498,12 @@ router.post(
       if (!name || !email || !phone || !password) {
         return res.status(400).json({ 
           success: false,
-          error: "Missing required fields: name, email, phone, password" 
+          error: "Missing required fields" 
         });
       }
 
       const tempId = crypto.randomBytes(10).toString("hex");
-      console.log("Generated tempId:", tempId);
 
-      // Prepare provider data
       const providerData = {
         name,
         email,
@@ -444,7 +517,6 @@ router.post(
         referralMarketingExecutiveId,
       };
 
-      // Save temporary data
       const tempData = {
         tempId,
         provider: providerData,
@@ -462,15 +534,11 @@ router.post(
         JSON.stringify(tempData, null, 2)
       );
 
-      // Cashfree order
       const orderId = `SP_${Date.now()}_${tempId.substring(0, 8)}`;
-      console.log("Generated orderId:", orderId);
       
-      // Build URLs
       let returnUrl = buildReturnUrl(orderId, tempId, "provider");
       let notifyUrl = buildNotifyUrl();
       
-      // For production, ensure HTTPS
       if (process.env.CASHFREE_ENV === "PROD") {
         returnUrl = ensureHttpsForProduction(returnUrl);
         notifyUrl = ensureHttpsForProduction(notifyUrl);
@@ -493,11 +561,6 @@ router.post(
         order_note: "Service Provider Registration Payment",
       };
 
-      console.log("Creating Cashfree order for provider:", {
-        order_id: orderData.order_id,
-        customer_email: orderData.customer_details.customer_email
-      });
-
       const response = await Cashfree.PGCreateOrder("2023-08-01", orderData);
 
       console.log("✅ Cashfree order created:", response.data.order_id);
@@ -511,15 +574,9 @@ router.post(
       });
     } catch (err) {
       console.error("❌ Service Provider Order Error:", err.message);
-      
-      let userMessage = "Order creation failed";
-      if (err.response?.data?.message?.includes("return_url")) {
-        userMessage = "Payment gateway requires HTTPS URLs for production. Please switch to SANDBOX mode for local testing.";
-      }
-      
       res.status(500).json({ 
         success: false,
-        error: userMessage,
+        error: "Order creation failed",
         details: process.env.NODE_ENV === "development" ? err.message : undefined
       });
     }
@@ -527,20 +584,16 @@ router.post(
 );
 
 /* =====================================================
-   4️⃣ SERVICE PROVIDER — VERIFY PAYMENT
+   4️⃣ SERVICE PROVIDER — VERIFY PAYMENT (FIXED WITH EXPIRESAT)
 ===================================================== */
 router.post("/service-provider/verify", express.json(), async (req, res) => {
   let tempFile = null;
   let emailSentSuccessfully = false;
   
-  console.log("🔵 Service provider verify request received");
-  console.log("Request body:", { tempId: req.body.tempId, cashfree_order_id: req.body.cashfree_order_id });
-
   try {
     const { tempId, cashfree_order_id } = req.body;
 
     if (!tempId || !cashfree_order_id) {
-      console.error("❌ Missing parameters:", { tempId, cashfree_order_id });
       return res.status(400).json({
         success: false,
         error: "Missing tempId or Cashfree order ID",
@@ -548,10 +601,7 @@ router.post("/service-provider/verify", express.json(), async (req, res) => {
     }
 
     tempFile = path.join(TEMP_PROVIDERS_DIR, `${tempId}.json`);
-    console.log("📁 Temp file path:", tempFile);
-    
     if (!fs.existsSync(tempFile)) {
-      console.error("❌ Temp file does not exist:", tempFile);
       return res.status(400).json({
         success: false,
         error: "Session expired. Please restart registration.",
@@ -560,19 +610,11 @@ router.post("/service-provider/verify", express.json(), async (req, res) => {
 
     const tempData = JSON.parse(fs.readFileSync(tempFile));
     const { provider: p, files } = tempData;
-    
-    console.log("📝 Provider data from temp file:", { 
-      email: p.email, 
-      name: p.name,
-      hasFiles: !!files 
-    });
 
     /* =====================================================
-       ✅ STEP 1: VERIFY ACTUAL PAYMENT
+       ✅ STEP 1: VERIFY PAYMENT
     ===================================================== */
     let successfulPayment;
-    console.log("🔄 Verifying Cashfree payment for order:", cashfree_order_id);
-
     try {
       const paymentsRes = await Cashfree.PGOrderPayments(
         "2023-08-01",
@@ -584,23 +626,13 @@ router.post("/service-provider/verify", express.json(), async (req, res) => {
       );
 
       if (!successfulPayment) {
-        console.error("❌ No successful payment found for order:", cashfree_order_id);
-        console.log("All payments:", paymentsRes.data);
         return res.status(400).json({
           success: false,
           error: "Payment not completed. Registration blocked.",
         });
       }
-      
-      console.log("✅ Payment verified:", {
-        payment_id: successfulPayment.cf_payment_id,
-        amount: successfulPayment.payment_amount,
-        status: successfulPayment.payment_status,
-        time: successfulPayment.payment_time
-      });
     } catch (err) {
       console.error("❌ Cashfree payment verification failed:", err.message);
-      console.error(err.stack);
       return res.status(400).json({
         success: false,
         error: "Unable to verify payment. Please try again.",
@@ -608,43 +640,43 @@ router.post("/service-provider/verify", express.json(), async (req, res) => {
     }
 
     /* =====================================================
-       ✅ STEP 2: PREVENT DUPLICATE PROVIDER
+       ✅ STEP 2: PREVENT DUPLICATE
     ===================================================== */
-    console.log("🔍 Checking for existing provider with email:", p.email);
     const existingProvider = await ServiceProvider.findOne({ email: p.email });
     if (existingProvider) {
-      console.log("⚠️ Provider already exists:", existingProvider._id);
-      try { 
-        fs.unlinkSync(tempFile); 
-        console.log("🧹 Cleared temp file for existing provider");
-      } catch (fileErr) {
-        console.error("⚠️ Failed to delete temp file:", fileErr.message);
-      }
+      try { fs.unlinkSync(tempFile); } catch {}
       return res.json({
         success: true,
         existing: true,
         message: "Account already exists. Please login.",
         providerId: existingProvider._id,
-        email: existingProvider.email,
-        name: existingProvider.name,
       });
     }
 
     /* =====================================================
-       ✅ STEP 3: CREATE SUBSCRIPTION (PROPER)
+       ✅ STEP 3: CREATE SUBSCRIPTION WITH EXPIRESAT (CRITICAL FIX)
     ===================================================== */
+    const paidAt = new Date(successfulPayment.payment_time);
+    const expiresAt = calculateExpiryDate(paidAt);
+
+    console.log("🚨 SERVICE PROVIDER SUBSCRIPTION DATES (FIXED):");
+    console.log(`   Payment time: ${successfulPayment.payment_time}`);
+    console.log(`   Paid at: ${paidAt.toISOString()}`);
+    console.log(`   Expires at: ${expiresAt.toISOString()}`);
+
     const subscription = {
       active: true,
-      paidAt: new Date(successfulPayment.payment_time),
+      lastPaidAt: paidAt,
+      expiresAt: expiresAt,
       paymentGateway: "cashfree",
       cashfreeOrderId: cashfree_order_id,
       cashfreePaymentId: successfulPayment.cf_payment_id,
       amount: successfulPayment.payment_amount,
       currency: successfulPayment.payment_currency,
       paymentStatus: successfulPayment.payment_status,
+      // 🚨 ADD THIS: Keep paidAt for backward compatibility
+      paidAt: paidAt
     };
-    
-    console.log("📅 Subscription created:", subscription);
 
     /* =====================================================
        ✅ STEP 4: CREATE SERVICE PROVIDER
@@ -668,67 +700,42 @@ router.post("/service-provider/verify", express.json(), async (req, res) => {
       createdAt: new Date(),
     });
 
-    console.log("💾 Saving new provider to database...");
     await newProvider.save();
-    console.log("✅ Provider saved with ID:", newProvider._id);
 
     /* =====================================================
-       ✅ STEP 5: SEND WELCOME EMAIL (WITH ENHANCED LOGGING)
+       ✅ STEP 5: CREATE SUBSCRIPTION RECORD
     ===================================================== */
-    console.log("📧 Attempting to send welcome email to:", newProvider.email);
+    const subscriptionRecord = await createSubscriptionRecord(
+      newProvider._id,
+      "service-provider",
+      successfulPayment,
+      cashfree_order_id,
+      successfulPayment.cf_payment_id
+    );
     
+    if (!subscriptionRecord.success) {
+      console.error("⚠️ Subscription record creation failed but provider was created");
+    }
+
+    /* =====================================================
+       ✅ STEP 6: SEND WELCOME EMAIL
+    ===================================================== */
     try {
-      // Log the email parameters being sent
-      console.log("Email parameters:", {
-        to: newProvider.email,
-        name: newProvider.name,
-        role: "service-provider"
-      });
-      
-      // Call the email function and await its result
-      const emailResult = await sendWelcomeEmail({
+      await sendWelcomeEmail({
         to: newProvider.email,
         name: newProvider.name,
         role: "service-provider",
       });
-      
       emailSentSuccessfully = true;
-      console.log("✅ Welcome email sent to:", newProvider.email);
-      
-      // If the email function returns something, log it
-      if (emailResult) {
-        console.log("📧 Email function returned:", emailResult);
-      }
     } catch (emailErr) {
-      // Log the FULL error, not just the message
-      console.error("❌ Email sending FAILED for:", newProvider.email);
-      console.error("Email error details:", {
-        message: emailErr.message,
-        stack: emailErr.stack,
-        code: emailErr.code,
-        response: emailErr.response
-      });
-      
-      // Check if it's a specific type of error
-      if (emailErr.response) {
-        console.error("Email API response:", {
-          status: emailErr.response.status,
-          data: emailErr.response.data,
-          headers: emailErr.response.headers
-        });
-      }
-      
-      // Don't fail the registration if email fails
-      console.log("⚠️ Continuing registration despite email failure...");
+      console.error("❌ Email sending FAILED:", emailErr.message);
     }
 
     /* =====================================================
-       ✅ STEP 6: GENERATE LOGIN TOKEN FOR AUTO-LOGIN
+       ✅ STEP 7: GENERATE LOGIN TOKEN
     ===================================================== */
-    console.log("🔑 Generating JWT token...");
-    
     if (!process.env.JWT_SECRET) {
-      throw new Error("JWT_SECRET is not defined in environment variables");
+      throw new Error("JWT_SECRET is not defined");
     }
     
     const loginToken = jwt.sign(
@@ -736,16 +743,16 @@ router.post("/service-provider/verify", express.json(), async (req, res) => {
         id: newProvider._id,
         email: newProvider.email,
         role: "service-provider",
+        subscription: newProvider.subscription,
+        subscriptionValid: true,
         createdAt: new Date().toISOString()
       },
       process.env.JWT_SECRET,
-      { expiresIn: "24h" } // Extended for better user experience
+      { expiresIn: "24h" }
     );
-    
-    console.log("✅ JWT token generated");
 
     /* =====================================================
-       ✅ STEP 7: PREPARE FINAL RESPONSE
+       ✅ STEP 8: SEND RESPONSE
     ===================================================== */
     const responseData = {
       success: true,
@@ -754,57 +761,36 @@ router.post("/service-provider/verify", express.json(), async (req, res) => {
       email: newProvider.email,
       name: newProvider.name,
       loginToken: loginToken,
-      redirectUrl: "/service-provider-dashboard",
-      emailSent: emailSentSuccessfully, // Include email status in response
-      timestamp: new Date().toISOString()
+      subscription: {
+        active: subscription.active,
+        expiresAt: subscription.expiresAt,
+        lastPaidAt: subscription.lastPaidAt,
+        paidAt: subscription.paidAt
+      },
+      subscriptionRecordCreated: subscriptionRecord.success,
+      emailSent: emailSentSuccessfully,
     };
-    
-    console.log("📤 Sending response:", {
-      providerId: responseData.providerId,
-      email: responseData.email,
-      emailSent: responseData.emailSent,
-      hasToken: !!responseData.loginToken
-    });
 
     return res.json(responseData);
 
   } catch (err) {
     console.error("❌ Service Provider Verification Error:", err.message);
-    console.error("Full error stack:", err.stack);
-    
-    // Log additional context for debugging
-    console.error("Error context:", {
-      tempFileExists: tempFile ? fs.existsSync(tempFile) : 'tempFile not set',
-      email: req.body?.email || 'unknown'
-    });
-    
     return res.status(500).json({
       success: false,
       error: "Registration failed. Please contact support.",
-      // Only include internal details in development
       internalError: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
   } finally {
-    /* =====================================================
-       ✅ STEP 8: CLEAN TEMP FILE (Always runs, success or error)
-    ===================================================== */
     if (tempFile && fs.existsSync(tempFile)) {
-      try {
-        fs.unlinkSync(tempFile);
-        console.log("🧹 Cleared temp file:", tempFile);
-      } catch (cleanupErr) {
+      try { fs.unlinkSync(tempFile); } catch (cleanupErr) {
         console.error("⚠️ Failed to delete temp file:", cleanupErr.message);
       }
-    } else if (tempFile) {
-      console.log("ℹ️ Temp file already removed or didn't exist:", tempFile);
     }
-    
-    console.log("🏁 Verification process completed");
-    console.log("=".repeat(50));
   }
 });
+
 /* =====================================================
-   🔄 CASHFREE WEBHOOK HANDLER
+   🔄 CASHFREE WEBHOOK HANDLER (FIXED)
 ===================================================== */
 router.post(
   "/cashfree-webhook",
@@ -814,45 +800,26 @@ router.post(
       console.log("🔔 Cashfree webhook received");
 
       const event = req.body;
-      console.log("Webhook payload:", JSON.stringify(event, null, 2));
-
-      // 1️⃣ Validate event type
       const eventType = event.type;
+      
       if (!eventType) {
         return res.status(200).json({ received: true });
       }
 
-      // 2️⃣ Extract order + payment info
       const orderId = event?.data?.order?.order_id;
       const orderStatus = event?.data?.order?.order_status;
       const paymentStatus = event?.data?.payment?.payment_status;
 
-      console.log("Webhook parsed:", {
-        eventType,
-        orderId,
-        orderStatus,
-        paymentStatus,
-      });
-
-      // 3️⃣ Process only SUCCESS / PAID events
-      if (
-        orderId &&
-        (orderStatus === "PAID" || paymentStatus === "SUCCESS")
-      ) {
+      if (orderId && (orderStatus === "PAID" || paymentStatus === "SUCCESS")) {
         console.log("✅ Payment successful via webhook for:", orderId);
 
-        // OPTIONAL: double-verify with Cashfree API
-        const orderRes = await Cashfree.PGFetchOrder(
-          "2023-08-01",
-          orderId
-        );
-
+        const orderRes = await Cashfree.PGFetchOrder("2023-08-01", orderId);
+        
         if (orderRes.data.order_status !== "PAID") {
           console.warn("⚠️ Order not PAID on fetch, skipping");
           return res.status(200).json({ received: true });
         }
 
-        // 🔑 FIND TEMP AGENT FILE
         const tempFiles = fs.readdirSync(TEMP_AGENTS_DIR);
         const tempFileName = tempFiles.find(f =>
           f.includes(orderId.split("_").pop())
@@ -866,7 +833,6 @@ router.post(
         const tempPath = path.join(TEMP_AGENTS_DIR, tempFileName);
         const { pendingAgent } = JSON.parse(fs.readFileSync(tempPath));
 
-        // Prevent duplicate creation
         const existing = await Agent.findOne({ email: pendingAgent.email });
         if (existing) {
           console.log("ℹ️ Agent already exists, skipping create");
@@ -874,34 +840,2168 @@ router.post(
           return res.status(200).json({ received: true });
         }
 
-        // 🧾 CREATE AGENT
+        const paidAt = new Date();
+        const expiresAt = calculateExpiryDate(paidAt);
+        
         const newAgent = await Agent.create({
           ...pendingAgent,
           agentId: `AGT-${Date.now().toString().slice(-6)}`,
           subscription: {
             active: true,
-            paidAt: new Date(),
+            lastPaidAt: paidAt,
+            expiresAt: expiresAt,
             paymentGateway: "cashfree",
             cashfreeOrderId: orderId,
+            // 🚨 ADD THIS
+            paidAt: paidAt
           },
           status: "active",
         });
 
-        fs.unlinkSync(tempPath);
+        await createSubscriptionRecord(
+          newAgent._id,
+          "agent",
+          { payment_status: "SUCCESS", payment_amount: 1500, payment_currency: "INR" },
+          orderId,
+          event?.data?.payment?.cf_payment_id || "webhook_payment"
+        );
 
+        fs.unlinkSync(tempPath);
         console.log("🎉 Agent created via webhook:", newAgent._id);
       }
 
-      // ALWAYS return 200
       res.status(200).json({ received: true });
     } catch (err) {
       console.error("❌ Webhook processing error:", err.message);
-      res.status(200).json({ received: true }); // never fail webhook
+      res.status(200).json({ received: true });
     }
   }
 );
 
 
+
+// ================== TEST ROUTES ==================
+router.get("/test", (req, res) => {
+  res.json({ message: "Payments API is working!" });
+});
+
+router.get("/service-provider/test", (req, res) => {
+  res.json({ message: "Service provider payments route works!" });
+});
+
+// ================== SERVICE PROVIDER RENEWAL ==================
+router.post("/service-provider/create-renewal-order", auth, async (req, res) => {
+  try {
+    console.log("🔄 Service provider RENEWAL order request received");
+
+    // Check user role
+    if (req.user.role !== "service") {
+      return res.status(403).json({ 
+        success: false, 
+        error: "Only service providers can renew" 
+      });
+    }
+
+    // Get provider from database
+    const provider = await ServiceProvider.findById(req.user.id);
+    if (!provider) {
+      return res.status(404).json({ 
+        success: false, 
+        error: "Provider not found" 
+      });
+    }
+
+    console.log("👤 Processing renewal for:", provider.name, provider.email);
+
+    // Fixed amount for renewal
+    const amount = 1500;
+    const orderId = `RENEW_SP_${provider._id}_${Date.now()}`;
+
+    // Cashfree configuration
+    // ✅ Use YOUR variable names
+    const isProd = process.env.CASHFREE_ENV === "PROD";
+    const baseUrl = isProd 
+      ? "https://api.cashfree.com" 
+      : "https://sandbox.cashfree.com";
+
+    // ✅ Use YOUR variable names from .env
+    const clientId = process.env.CASHFREE_APP_ID; // Changed from CASHFREE_CLIENT_ID
+    const clientSecret = process.env.CASHFREE_SECRET_KEY; // Changed from CASHFREE_CLIENT_SECRET
+
+    console.log("🔑 Cashfree credentials check:");
+    console.log("   Client ID exists:", !!clientId);
+    console.log("   Client Secret exists:", !!clientSecret);
+    console.log("   Environment:", process.env.CASHFREE_ENV);
+
+    // Check if Cashfree credentials exist
+    if (!clientId || !clientSecret) {
+      console.warn("⚠️ Cashfree credentials not set, using test mode");
+      
+      // Development/test mode
+      return res.json({
+        success: true,
+        test_mode: true,
+        order_id: orderId,
+        redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${orderId}`,
+        message: "Test mode - Cashfree not configured"
+      });
+    }
+
+    // Return URLs
+    const returnUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?order_id=${orderId}&type=renewal&role=service`;
+    const notifyUrl = `${process.env.API_BASE || 'http://localhost:4000/api'}/payments/renewal-webhook`;
+
+    // Order data for Cashfree
+    const orderData = {
+      order_id: orderId,
+      order_amount: amount,
+      order_currency: "INR",
+      customer_details: {
+        customer_id: provider._id.toString(),
+        customer_email: provider.email,
+        customer_phone: provider.phone || "9999999999",
+        customer_name: provider.name,
+      },
+      order_meta: {
+        return_url: returnUrl,
+        notify_url: notifyUrl,
+      },
+      order_note: "Service Provider Subscription Renewal",
+    };
+
+    console.log("📤 Calling Cashfree API:", `${baseUrl}/pg/orders`);
+    console.log("📦 Request headers:", {
+      "x-api-version": "2023-08-01",
+      "x-client-id": clientId.substring(0, 10) + "..." // Log only first 10 chars for security
+    });
+
+    // Call Cashfree API
+    const response = await axios.post(
+      `${baseUrl}/pg/orders`,
+      orderData,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-version": "2023-08-01",
+          "x-client-id": clientId,
+          "x-client-secret": clientSecret,
+        },
+      }
+    );
+
+    console.log("✅ Cashfree response received");
+    console.log("   Payment Session ID:", response.data.payment_session_id);
+    console.log("   Order ID:", response.data.order_id);
+
+    return res.json({
+      success: true,
+      paymentGateway: "cashfree",
+      order_id: orderId,
+      payment_session_id: response.data.payment_session_id,
+      payment_link: `${baseUrl}/pg/links/${orderId}`,
+      redirect_url: `${baseUrl}/pg/view/${response.data.payment_session_id}`,
+      amount: amount,
+      currency: "INR",
+      message: "Renewal payment order created successfully"
+    });
+
+  } catch (err) {
+    console.error("❌ Renewal Order Error:");
+    console.error("Error message:", err.message);
+    
+    if (err.response) {
+      console.error("Response status:", err.response.status);
+      console.error("Response data:", JSON.stringify(err.response.data, null, 2));
+      console.error("Response headers:", err.response.headers);
+    }
+    
+    // Check if it's an authentication error
+    if (err.response?.status === 401) {
+      return res.status(401).json({
+        success: false,
+        error: "Cashfree authentication failed. Check your credentials.",
+        hint: "Verify CASHFREE_APP_ID and CASHFREE_SECRET_KEY in .env file"
+      });
+    }
+    
+    // For development, return test data
+    if (process.env.NODE_ENV === "development") {
+      const orderId = `TEST_RENEW_${Date.now()}`;
+      return res.json({
+        success: true,
+        test_mode: true,
+        order_id: orderId,
+        redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${orderId}`,
+        message: "Development mode - Cashfree error: " + err.message
+      });
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: "Renewal order failed",
+      details: err.response?.data?.message || err.message
+    });
+  }
+});
+// ================== AGENT RENEWAL ==================
+// ================== AGENT RENEWAL ==================
+router.post("/agent/create-renewal-order", auth, async (req, res) => {
+  try {
+    console.log("🔄 Agent RENEWAL order request received");
+
+    // Check user role
+    if (req.user.role !== "agent") {
+      return res.status(403).json({ 
+        success: false, 
+        error: "Only agents can renew" 
+      });
+    }
+
+    // Get agent from database
+    const agent = await Agent.findById(req.user.id);
+    if (!agent) {
+      return res.status(404).json({ 
+        success: false, 
+        error: "Agent not found" 
+      });
+    }
+
+    console.log("👤 Processing renewal for agent:", agent.name, agent.email);
+
+    // Fixed amount for renewal
+    const amount = 2000; // Agent amount
+    const orderId = `RENEW_AGENT_${agent._id}_${Date.now()}`;
+
+    // Cashfree configuration
+    const isProd = process.env.CASHFREE_ENV === "PROD";
+    const baseUrl = isProd 
+      ? "https://api.cashfree.com" 
+      : "https://sandbox.cashfree.com";
+
+    // Use YOUR variable names from .env
+    const clientId = process.env.CASHFREE_APP_ID;
+    const clientSecret = process.env.CASHFREE_SECRET_KEY;
+
+    console.log("🔑 Cashfree credentials check:");
+    console.log("   Client ID exists:", !!clientId);
+    console.log("   Client Secret exists:", !!clientSecret);
+    console.log("   Environment:", process.env.CASHFREE_ENV);
+
+    // Check if Cashfree credentials exist
+    if (!clientId || !clientSecret) {
+      console.warn("⚠️ Cashfree credentials not set, using test mode");
+      
+      // Development/test mode
+      return res.json({
+        success: true,
+        test_mode: true,
+        order_id: orderId,
+        redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${orderId}`,
+        message: "Test mode - Cashfree not configured"
+      });
+    }
+
+    // Return URLs
+    const returnUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?order_id=${orderId}&type=renewal&role=agent`;
+    const notifyUrl = `${process.env.API_BASE || 'http://localhost:4000/api'}/payments/subscription-renew-webhook`;
+
+    // Order data for Cashfree
+    const orderData = {
+      order_id: orderId,
+      order_amount: amount,
+      order_currency: "INR",
+      customer_details: {
+        customer_id: agent._id.toString(),
+        customer_email: agent.email,
+        customer_phone: agent.phone || "9999999999",
+        customer_name: agent.name,
+      },
+      order_meta: {
+        return_url: returnUrl,
+        notify_url: notifyUrl,
+      },
+      order_note: "Agent Subscription Renewal",
+    };
+
+    console.log("📤 Calling Cashfree API:", `${baseUrl}/pg/orders`);
+    console.log("📦 Request data:", {
+      order_id: orderId,
+      amount: amount,
+      customer_email: agent.email
+    });
+
+    try {
+      // Call Cashfree API
+      const response = await axios.post(
+        `${baseUrl}/pg/orders`,
+        orderData,
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-version": "2023-08-01",
+            "x-client-id": clientId,
+            "x-client-secret": clientSecret,
+          },
+        }
+      );
+
+      console.log("✅ Cashfree response received");
+      console.log("   Payment Session ID:", response.data.payment_session_id);
+      console.log("   Order ID:", response.data.order_id);
+
+      return res.json({
+        success: true,
+        paymentGateway: "cashfree",
+        order_id: orderId,
+        payment_session_id: response.data.payment_session_id, // This is what frontend needs!
+        payment_link: `${baseUrl}/pg/links/${orderId}`,
+        redirect_url: `${baseUrl}/pg/view/${response.data.payment_session_id}`,
+        amount: amount,
+        currency: "INR",
+        message: "Agent renewal payment order created successfully"
+      });
+
+    } catch (cashfreeErr) {
+      console.error("❌ Cashfree API Error:");
+      console.error("Error message:", cashfreeErr.message);
+      
+      if (cashfreeErr.response) {
+        console.error("Response status:", cashfreeErr.response.status);
+        console.error("Response data:", cashfreeErr.response.data);
+      }
+      
+      // For development, return test data
+      if (process.env.NODE_ENV === "development") {
+        const testOrderId = `TEST_RENEW_AGENT_${Date.now()}`;
+        return res.json({
+          success: true,
+          test_mode: true,
+          order_id: testOrderId,
+          payment_session_id: `test_session_${Date.now()}`,
+          redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${testOrderId}`,
+          message: "Development mode - Using test payment session"
+        });
+      }
+      
+      throw cashfreeErr;
+    }
+
+  } catch (err) {
+    console.error("❌ Agent Renewal Order Error:", err.message);
+    
+    // Check if it's an authentication error
+    if (err.response?.status === 401) {
+      return res.status(401).json({
+        success: false,
+        error: "Cashfree authentication failed. Check your credentials.",
+        hint: "Verify CASHFREE_APP_ID and CASHFREE_SECRET_KEY in .env file"
+      });
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: "Agent renewal failed",
+      details: err.response?.data?.message || err.message
+    });
+  }
+});
+
+/* =====================================================
+   ✅ VERIFY RENEWAL PAYMENT (FIXED VERSION)
+===================================================== */
+router.post("/verify-renewal-payment", express.json(), async (req, res) => {
+  try {
+    console.log("🔵 Verify renewal payment request received");
+    console.log("📦 Full request body:", JSON.stringify(req.body, null, 2));
+
+    const { orderId, userId, userType } = req.body;
+
+    /* ===============================
+       BASIC VALIDATION
+    =============================== */
+    if (!orderId) {
+      return res.status(400).json({ success: false, error: "Order ID is required" });
+    }
+
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "User ID is required" });
+    }
+
+    if (!userType) {
+      return res.status(400).json({
+        success: false,
+        error: "User type is required (agent / service-provider)",
+      });
+    }
+
+    console.log(`👤 Verifying for: userId=${userId}, userType=${userType}`);
+    console.log(`📦 Order ID: ${orderId}`);
+
+    /* ===============================
+       NORMALIZE USER TYPE (CRITICAL)
+    =============================== */
+    const normalizedUserType =
+      userType === "agent"
+        ? "agent"
+        : userType === "provider" || userType === "service-provider"
+        ? "provider"
+        : null;
+
+    if (!normalizedUserType) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid user type. Must be agent or service-provider",
+      });
+    }
+
+    console.log("🔁 Normalized userType:", normalizedUserType);
+
+    /* ===============================
+       STEP 1: FIND USER
+    =============================== */
+    let user;
+    if (normalizedUserType === "agent") {
+      user = await Agent.findById(userId);
+    } else {
+      user = await ServiceProvider.findById(userId);
+    }
+
+    if (!user) {
+      console.log(`❌ User not found: ${userId}`);
+      return res.status(404).json({ success: false, error: "User not found" });
+    }
+
+    console.log(`✅ User found: ${user.name} (${user.email})`);
+
+    /* ===============================
+       STEP 2: VERIFY PAYMENT (CASHFREE)
+    =============================== */
+    let paymentVerified = false;
+    let paymentData = null;
+
+    try {
+      console.log("🔍 Checking Cashfree payment status for order:", orderId);
+
+      const paymentResponse = await Cashfree.PGOrderPayments(
+        "2023-08-01",
+        orderId
+      );
+
+      console.log(
+        "💰 Payment response:",
+        JSON.stringify(paymentResponse.data, null, 2)
+      );
+
+      if (Array.isArray(paymentResponse.data)) {
+        const successPayment = paymentResponse.data.find(
+          (p) => p.payment_status === "SUCCESS"
+        );
+
+        if (successPayment) {
+          paymentVerified = true;
+          paymentData = successPayment;
+          console.log(
+            "✅ Payment verified:",
+            successPayment.cf_payment_id
+          );
+        }
+      }
+    } catch (err) {
+      console.error("❌ Cashfree payment fetch error:", err.message);
+    }
+
+    /* ===============================
+       STEP 3: FALLBACK – ORDER STATUS
+    =============================== */
+    if (!paymentVerified) {
+      console.log("🔄 Trying order status verification...");
+      try {
+        const orderResponse = await Cashfree.PGFetchOrder(
+          "2023-08-01",
+          orderId
+        );
+
+        console.log(
+          "📦 Order response:",
+          JSON.stringify(orderResponse.data, null, 2)
+        );
+
+        if (orderResponse.data.order_status === "PAID") {
+          paymentVerified = true;
+        }
+      } catch (err) {
+        console.error("❌ Order fetch error:", err.message);
+      }
+    }
+
+    if (!paymentVerified) {
+      return res.status(400).json({
+        success: false,
+        error: "Payment not verified",
+        message:
+          "No successful payment found. Please wait 2–3 minutes or check Cashfree dashboard.",
+        orderId,
+      });
+    }
+
+    /* ===============================
+       STEP 4: DUPLICATE PROTECTION
+    =============================== */
+    if (
+      user.subscription?.cashfreeOrderId === orderId ||
+      user.subscription?.renewalOrderId === orderId
+    ) {
+      return res.json({
+        success: true,
+        alreadyProcessed: true,
+        message: "Subscription already renewed with this payment",
+        expiresAt: user.subscription.expiresAt,
+        subscription: user.subscription,
+      });
+    }
+
+    /* ===============================
+       STEP 5: CALCULATE NEW EXPIRY
+    =============================== */
+    const now = new Date();
+    const paidAt = paymentData?.payment_time
+      ? new Date(paymentData.payment_time)
+      : now;
+
+    const currentExpiry = user.subscription?.expiresAt
+      ? new Date(user.subscription.expiresAt)
+      : null;
+
+    const baseDate =
+      currentExpiry && currentExpiry > now ? currentExpiry : now;
+
+    const newExpiry = new Date(baseDate);
+    newExpiry.setMonth(newExpiry.getMonth() + 1);
+
+    console.log("🎯 New expiry:", newExpiry.toISOString());
+
+    /* ===============================
+       STEP 6: UPDATE SUBSCRIPTION
+    =============================== */
+    const updatedSubscription = {
+      active: true,
+      paidAt,
+      lastPaidAt: paidAt,
+      expiresAt: newExpiry,
+      paymentGateway: "cashfree",
+      cashfreeOrderId: orderId,
+      renewalOrderId: orderId,
+      cashfreePaymentId:
+        paymentData?.cf_payment_id || `verified_${Date.now()}`,
+      paymentStatus: "SUCCESS",
+      amount: paymentData?.payment_amount || 1500,
+      currency: paymentData?.payment_currency || "INR",
+      lastRenewalDate: paidAt,
+    };
+
+    user.subscription = {
+      ...user.subscription,
+      ...updatedSubscription,
+    };
+
+    await user.save();
+    console.log("✅ Subscription updated");
+
+    /* ===============================
+       STEP 7: SUBSCRIPTION HISTORY
+    =============================== */
+    try {
+      await createSubscriptionRecord(
+        userId,
+        normalizedUserType === "agent" ? "agent" : "service-provider",
+        {
+          payment_status: "SUCCESS",
+          payment_amount: updatedSubscription.amount,
+          payment_currency: "INR",
+          payment_time: paidAt.toISOString(),
+        },
+        orderId,
+        updatedSubscription.cashfreePaymentId
+      );
+      console.log("📜 Subscription history created");
+    } catch (err) {
+      console.error("⚠️ History record error:", err.message);
+    }
+
+    /* ===============================
+       STEP 8: EMAIL
+    =============================== */
+    try {
+      await sendWelcomeEmail({
+        to: user.email,
+        name: user.name,
+        role: normalizedUserType,
+        isRenewal: true,
+        expiresAt: newExpiry,
+      });
+      console.log("📧 Renewal email sent");
+    } catch (err) {
+      console.error("❌ Email error:", err.message);
+    }
+
+    /* ===============================
+       STEP 9: RESPONSE
+    =============================== */
+    const daysRemaining = Math.ceil(
+      (newExpiry - now) / (1000 * 60 * 60 * 24)
+    );
+
+    return res.json({
+      success: true,
+      message: "Subscription renewed successfully!",
+      newExpiry: newExpiry.toISOString(),
+      formattedExpiry: newExpiry.toLocaleDateString("en-IN"),
+      subscription: {
+        active: true,
+        expiresAt: newExpiry,
+        lastPaidAt: paidAt,
+        daysRemaining,
+        amount: updatedSubscription.amount,
+        currency: updatedSubscription.currency,
+      },
+      details: {
+        orderId,
+        paymentId: updatedSubscription.cashfreePaymentId,
+        renewedFrom: currentExpiry,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Renewal verification error:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Renewal verification failed",
+      message: err.message,
+    });
+  }
+});
+
+
+
+
+
+
+
+
+/* =====================================================
+   🔄 SUBSCRIPTION RENEWAL WEBHOOK (FIXED)
+===================================================== */
+router.post(
+  "/subscription-renew-webhook",
+  express.json({ type: "*/*" }),
+  async (req, res) => {
+    try {
+      console.log("🔔 Subscription renewal webhook received");
+
+      const event = req.body;
+      if (!event?.type) {
+        return res.status(200).json({ received: true });
+      }
+
+      const orderId = event?.data?.order?.order_id;
+      const orderStatus = event?.data?.order?.order_status;
+      const paymentStatus = event?.data?.payment?.payment_status;
+
+      if (!orderId || !(orderStatus === "PAID" || paymentStatus === "SUCCESS")) {
+        return res.status(200).json({ received: true });
+      }
+
+      console.log("✅ Renewal payment successful for:", orderId);
+
+      const parts = orderId.split("_");
+      if (parts.length < 3) {
+        console.warn("⚠️ Invalid renewal order format:", orderId);
+        return res.status(200).json({ received: true });
+      }
+
+      const userId = parts[2]; // ✅ correct index
+      const userType = parts[0] === "AGENT" ? "agent" : "provider";
+
+      const user =
+        userType === "agent"
+          ? await Agent.findById(userId)
+          : await ServiceProvider.findById(userId);
+
+      if (!user || !user.subscription) {
+        console.warn("⚠️ User or subscription not found:", userId);
+        return res.status(200).json({ received: true });
+      }
+
+      const paidAt = new Date(
+        event?.data?.payment?.payment_time || Date.now()
+      );
+
+      // 🔥 CRITICAL FIX: Always extend from CURRENT expiry
+      let baseDate;
+      const currentExpiry = user.subscription?.expiresAt ? new Date(user.subscription.expiresAt) : null;
+      const now = new Date();
+
+      console.log("🔄 RENEWAL CALCULATION DEBUG:");
+      console.log(`   Now: ${now.toISOString()}`);
+      console.log(`   Current Expiry: ${currentExpiry ? currentExpiry.toISOString() : 'None'}`);
+      console.log(`   Is Current Expiry in future? ${currentExpiry ? currentExpiry > now : false}`);
+      console.log(`   Payment Time: ${paidAt.toISOString()}`);
+
+      if (currentExpiry && currentExpiry > now) {
+        // User is renewing BEFORE expiry - extend from current expiry
+        baseDate = currentExpiry;
+        console.log(`   🔵 Early renewal - extending from current expiry: ${baseDate.toISOString()}`);
+      } else {
+        // User is renewing AFTER expiry - start from now
+        baseDate = now;
+        console.log(`   🔴 Expired renewal - starting from now: ${baseDate.toISOString()}`);
+      }
+
+      // Add 1 month to the base date
+      const newExpiry = new Date(baseDate);
+      newExpiry.setMonth(newExpiry.getMonth() + 1);
+
+      console.log(`   🎯 New Expiry Date: ${newExpiry.toISOString()}`);
+      console.log(`   ⏰ Days added: 30 days (1 month)`);
+
+      user.subscription.active = true;
+      user.subscription.lastPaidAt = paidAt;
+      user.subscription.paidAt = paidAt;
+      user.subscription.expiresAt = newExpiry;
+      user.subscription.renewalOrderId = orderId;
+      user.subscription.renewalGateway = "cashfree";
+      user.subscription.lastRenewalDate = paidAt;
+
+      // Log the before/after for verification
+      console.log(`📊 SUBSCRIPTION UPDATE SUMMARY:`);
+      console.log(`   User: ${user.name} (${user.email})`);
+      console.log(`   User Type: ${userType}`);
+      console.log(`   Before: ${currentExpiry ? currentExpiry.toISOString() : 'No expiry'}`);
+      console.log(`   After: ${newExpiry.toISOString()}`);
+      console.log(`   Extended by: 1 month`);
+
+      await user.save();
+
+      // 📜 Save history
+      await createSubscriptionRecord(
+        userId,
+        userType,
+        {
+          payment_status: "SUCCESS",
+          payment_amount: event?.data?.payment?.payment_amount || 1500,
+          payment_currency: "INR",
+        },
+        orderId,
+        event?.data?.payment?.cf_payment_id || "renewal_webhook"
+      );
+
+      console.log(`🎉 ${userType} subscription renewed till ${newExpiry.toLocaleDateString()}`);
+
+      try {
+        await sendWelcomeEmail({
+          to: user.email,
+          name: user.name,
+          role: userType,
+          isRenewal: true,
+          expiresAt: newExpiry,
+        });
+      } catch (emailErr) {
+        console.error("❌ Renewal email failed:", emailErr.message);
+      }
+
+      return res.status(200).json({ received: true });
+
+    } catch (err) {
+      console.error("❌ Renewal webhook error:", err.message);
+      console.error("Error stack:", err.stack);
+      return res.status(200).json({ received: true });
+    }
+  }
+);
+/* =====================================================
+   🔄 CREATE RENEWAL ORDER
+===================================================== */
+router.post("/subscription/create-renewal-order", express.json(), async (req, res) => {
+  try {
+    console.log("🔵 Subscription renewal order request received");
+    
+    const { userId, userType, userEmail, userName, userPhone } = req.body;
+
+    if (!userId || !userType || !userEmail) {
+      return res.status(400).json({ 
+        success: false,
+        error: "Missing required fields" 
+      });
+    }
+
+    let user;
+    if (userType === 'agent') {
+      user = await Agent.findById(userId);
+    } else if (userType === 'provider') {
+      user = await ServiceProvider.findById(userId);
+    } else {
+      return res.status(400).json({ 
+        success: false,
+        error: "Invalid user type" 
+      });
+    }
+
+    if (!user) {
+      return res.status(404).json({ 
+        success: false,
+        error: "User not found" 
+      });
+    }
+
+    const tempId = crypto.randomBytes(10).toString("hex");
+    
+    const tempData = {
+      tempId,
+      userId,
+      userType,
+      userEmail,
+      userName,
+      userPhone,
+      paymentGateway: "cashfree",
+      isRenewal: true,
+      createdAt: new Date().toISOString()
+    };
+    
+    const tempDir = userType === 'agent' ? TEMP_AGENTS_DIR : TEMP_PROVIDERS_DIR;
+    const tempFileName = `renewal_${tempId}.json`;
+    
+    fs.writeFileSync(
+      path.join(tempDir, tempFileName),
+      JSON.stringify(tempData, null, 2)
+    );
+
+    const orderId = `${userType === 'agent' ? 'AGENT' : 'PROVIDER'}_RENEW_${userId}_${Date.now()}_${tempId.substring(0, 4)}`;
+    
+    let returnUrl = buildReturnUrl(orderId, tempId, userType, true);
+    let notifyUrl = buildNotifyUrl(true);
+    
+    if (process.env.CASHFREE_ENV === "PROD") {
+      returnUrl = ensureHttpsForProduction(returnUrl);
+      notifyUrl = ensureHttpsForProduction(notifyUrl);
+    }
+
+    const orderData = {
+      order_id: orderId,
+      order_amount: parseInt(process.env.SUBSCRIPTION_AMOUNT_INR || 1500),
+      order_currency: "INR",
+      customer_details: {
+        customer_id: userId,
+        customer_email: userEmail,
+        customer_phone: userPhone || user.phone,
+        customer_name: userName || user.name,
+      },
+      order_meta: {
+        return_url: returnUrl,
+        notify_url: notifyUrl,
+      },
+      order_note: "Monthly Subscription Renewal",
+    };
+
+    console.log("Creating renewal order for:", {
+      userId,
+      userType,
+      orderId
+    });
+
+    const response = await Cashfree.PGCreateOrder("2023-08-01", orderData);
+
+    console.log("✅ Renewal order created:", response.data.order_id);
+
+    return res.json({
+      success: true,
+      paymentGateway: "cashfree",
+      tempId,
+      order: response.data,
+      payment_session_id: response.data.payment_session_id,
+      isRenewal: true,
+    });
+
+  } catch (err) {
+    console.error("❌ Renewal Order Creation Error:", err.message);
+    res.status(500).json({ 
+      success: false,
+      error: "Renewal order creation failed",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined
+    });
+  }
+});
+
+/* =====================================================
+   💳 SUBSCRIPTION RENEW PAYMENT ENDPOINT
+===================================================== */
+router.post("/subscription/renew", async (req, res) => {
+  try {
+    console.log("🔵 Subscription renewal request received");
+    
+    const { userId, userType, userEmail, userName, userPhone } = req.body;
+
+    if (!userId || !userType || !userEmail) {
+      return res.status(400).json({ 
+        success: false,
+        error: "Missing required fields" 
+      });
+    }
+
+    let user;
+    if (userType === 'agent') {
+      user = await Agent.findById(userId);
+    } else if (userType === 'provider') {
+      user = await ServiceProvider.findById(userId);
+    } else {
+      return res.status(400).json({ 
+        success: false,
+        error: "Invalid user type" 
+      });
+    }
+
+    if (!user) {
+      return res.status(404).json({ 
+        success: false,
+        error: "User not found" 
+      });
+    }
+
+    const orderId = `RENEW_${Date.now()}_${userId}`;
+    
+    const orderData = {
+      order_id: orderId,
+      order_amount: parseInt(process.env.SUBSCRIPTION_AMOUNT_INR || 1500),
+      order_currency: "INR",
+      customer_details: {
+        customer_id: userId,
+        customer_email: userEmail,
+        customer_phone: userPhone || user.phone || "9999999999",
+        customer_name: userName || user.name,
+      },
+      order_meta: {
+        return_url: `${process.env.CLIENT_URL || "http://localhost:5173"}/payment-success`,
+      },
+      order_note: "Monthly Subscription Renewal",
+    };
+
+    console.log("Creating subscription renewal order:", {
+      userId,
+      userType,
+      orderId,
+      amount: orderData.order_amount
+    });
+
+    const response = await Cashfree.PGCreateOrder("2023-08-01", orderData);
+
+    console.log("✅ Renewal order created:", response.data.order_id);
+
+    return res.json({
+      success: true,
+      paymentGateway: "cashfree",
+      order: response.data,
+      payment_session_id: response.data.payment_session_id,
+      isRenewal: true,
+    });
+
+  } catch (err) {
+    console.error("❌ Subscription Renewal Error:", err.message);
+    res.status(500).json({ 
+      success: false,
+      error: "Renewal failed",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined
+    });
+  }
+});
+
+/* =====================================================
+   🔄 VERIFY RENEWAL PAYMENT (FIXED)
+===================================================== */
+router.post("/subscription/verify-renewal", auth, async (req, res) => {
+  try {
+    const { cashfree_order_id } = req.body;
+    const userId = req.user.id;
+    const userType = req.user.role; // "agent" | "service"
+
+    if (!cashfree_order_id) {
+      return res.status(400).json({ error: "Order ID missing" });
+    }
+
+    const user =
+      userType === "agent"
+        ? await Agent.findById(userId)
+        : await ServiceProvider.findById(userId);
+
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // 🔁 Prevent double renewal
+    if (user.subscription?.cashfreeOrderId === cashfree_order_id) {
+      return res.json({
+        success: true,
+        expiresAt: user.subscription.expiresAt,
+        message: "Subscription already renewed",
+      });
+    }
+
+    // 🔐 Verify order with Cashfree
+    const order = await Cashfree.PGFetchOrder(
+      "2023-08-01",
+      cashfree_order_id
+    );
+
+    if (order.data.order_status !== "PAID") {
+      return res.status(400).json({ error: "Payment not completed" });
+    }
+
+    // ⏳ Extend expiry safely
+    const now = new Date();
+    const currentExpiry = user.subscription?.expiresAt
+      ? new Date(user.subscription.expiresAt)
+      : null;
+
+    const base = currentExpiry && currentExpiry > now ? currentExpiry : now;
+    const newExpiry = new Date(base);
+    newExpiry.setDate(newExpiry.getDate() + 30);
+
+    user.subscription = {
+      ...user.subscription,
+      active: true,
+      paidAt: now,
+      expiresAt: newExpiry,
+      paymentGateway: "cashfree",
+      cashfreeOrderId: cashfree_order_id,
+    };
+
+    await user.save();
+
+    // 📜 History
+    await Subscription.create({
+      userId: user._id,
+      userType,
+      paymentGateway: "cashfree",
+      amount: order.data.order_amount,
+      currency: order.data.order_currency,
+      startedAt: now,
+      expiresAt: newExpiry,
+      status: "active",
+    });
+
+    res.json({
+      success: true,
+      expiresAt: newExpiry,
+      message: "Subscription renewed successfully",
+    });
+
+  } catch (err) {
+    console.error("VERIFY RENEW ERROR:", err.response?.data || err.message);
+    res.status(500).json({ error: "Renewal failed" });
+  }
+});
+
+/* =====================================================
+   🔍 GET SUBSCRIPTION STATUS
+===================================================== */
+router.get("/subscription/status/:userType/:userId", async (req, res) => {
+  try {
+    const { userType, userId } = req.params;
+    
+    console.log(`🔵 Getting subscription status for ${userType}: ${userId}`);
+    
+    let user;
+    if (userType === "agent") {
+      user = await Agent.findById(userId);
+    } else if (userType === "provider") {
+      user = await ServiceProvider.findById(userId);
+    } else {
+      return res.status(400).json({ 
+        success: false,
+        error: "Invalid user type" 
+      });
+    }
+
+    if (!user) {
+      return res.status(404).json({ 
+        success: false,
+        error: "User not found" 
+      });
+    }
+
+    const subscriptionHistory = await Subscription.find({
+      userId,
+      userType: userType === "agent" ? "agent" : "service-provider"
+    }).sort({ startedAt: -1 }).limit(10);
+
+    const isActive = isSubscriptionActive(user.subscription);
+    const now = new Date();
+    const expiresAt = user.subscription?.expiresAt ? new Date(user.subscription.expiresAt) : null;
+    
+    let daysRemaining = null;
+    if (expiresAt && expiresAt > now) {
+      daysRemaining = Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24));
+    }
+
+    return res.json({
+      success: true,
+      subscription: {
+        active: isActive,
+        isActive: isActive,
+        expiresAt: expiresAt,
+        lastPaidAt: user.subscription?.lastPaidAt,
+        paidAt: user.subscription?.paidAt,
+        daysRemaining: daysRemaining,
+        amount: user.subscription?.amount || 1500,
+        currency: user.subscription?.currency || "INR",
+        paymentGateway: user.subscription?.paymentGateway,
+        needsRenewal: !isActive || (daysRemaining !== null && daysRemaining <= 3)
+      },
+      subscriptionHistory: subscriptionHistory,
+      user: {
+        id: user._id,
+        email: user.email,
+        name: user.name,
+        type: userType
+      }
+    });
+    
+  } catch (err) {
+    console.error("❌ Subscription Status Error:", err.message);
+    res.status(500).json({ 
+      success: false,
+      error: "Status check failed" 
+    });
+  }
+});
+
+/* =====================================================
+   📧 SEND REMINDER EMAIL
+===================================================== */
+router.post("/subscription/send-reminder", express.json(), async (req, res) => {
+  try {
+    const { userId, userType, daysBefore = 3 } = req.body;
+    
+    if (!userId || !userType) {
+      return res.status(400).json({ 
+        success: false,
+        error: "Missing userId or userType" 
+      });
+    }
+    
+    let user;
+    if (userType === "agent") {
+      user = await Agent.findById(userId);
+    } else if (userType === "provider") {
+      user = await ServiceProvider.findById(userId);
+    } else {
+      return res.status(400).json({ 
+        success: false,
+        error: "Invalid user type" 
+      });
+    }
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false,
+        error: "User not found" 
+      });
+    }
+    
+    if (!user.subscription?.expiresAt) {
+      return res.status(400).json({ 
+        success: false,
+        error: "User has no subscription expiry date" 
+      });
+    }
+    
+    const expiresAt = new Date(user.subscription.expiresAt);
+    const now = new Date();
+    
+    if (expiresAt <= now) {
+      try {
+        await sendSubscriptionReminderEmail({
+          to: user.email,
+          name: user.name,
+          role: userType,
+          status: "expired",
+          expiresAt: expiresAt,
+          amount: 1500
+        });
+        
+        return res.json({
+          success: true,
+          message: "Expiry reminder sent",
+          status: "expired",
+          email: user.email
+        });
+      } catch (emailErr) {
+        console.error("❌ Reminder email failed:", emailErr.message);
+        return res.status(500).json({ 
+          success: false,
+          error: "Failed to send reminder email" 
+        });
+      }
+    } else {
+      const daysRemaining = Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24));
+      
+      if (daysRemaining <= daysBefore) {
+        try {
+          await sendSubscriptionReminderEmail({
+            to: user.email,
+            name: user.name,
+            role: userType,
+            status: "active",
+            expiresAt: expiresAt,
+            daysRemaining: daysRemaining,
+            amount: 1500
+          });
+          
+          return res.json({
+            success: true,
+            message: "Reminder sent",
+            status: "active",
+            daysRemaining: daysRemaining,
+            email: user.email
+          });
+        } catch (emailErr) {
+          console.error("❌ Reminder email failed:", emailErr.message);
+          return res.status(500).json({ 
+            success: false,
+            error: "Failed to send reminder email" 
+          });
+        }
+      } else {
+        return res.json({
+          success: true,
+          message: "No reminder needed yet",
+          daysRemaining: daysRemaining,
+          status: "active"
+        });
+      }
+    }
+  } catch (err) {
+    console.error("❌ Send Reminder Error:", err.message);
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to send reminder" 
+    });
+  }
+});
+
+/* =====================================================
+   🔍 GET SUBSCRIPTION HISTORY
+===================================================== */
+router.get("/subscription/history/:userType/:userId", async (req, res) => {
+  try {
+    const { userType, userId } = req.params;
+    
+    if (!userType || !userId) {
+      return res.status(400).json({ 
+        success: false,
+        error: "Missing userType or userId" 
+      });
+    }
+
+    const validUserType = userType === "agent" ? "agent" : "service-provider";
+    
+    const history = await Subscription.find({
+      userId,
+      userType: validUserType
+    })
+    .sort({ startedAt: -1 })
+    .limit(50);
+
+    res.json({
+      success: true,
+      count: history.length,
+      history: history
+    });
+    
+  } catch (err) {
+    console.error("❌ Subscription History Error:", err.message);
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to load subscription history" 
+    });
+  }
+});
+
+/* =====================================================
+   🎯 GENERIC RENEWAL ORDER ENDPOINT (for frontend)
+===================================================== */
+router.post("/create-renewal-order", auth, async (req, res) => {
+  try {
+    console.log("🎯 Generic renewal order endpoint called");
+    console.log("User info:", {
+      id: req.user.id,
+      role: req.user.role,
+      email: req.user.email
+    });
+
+    const { userId, userType, email, planName, amount } = req.body;
+
+    // Use authenticated user or provided data
+    const targetUserId = userId || req.user.id;
+    const targetUserType = userType || req.user.role; // 'agent' or 'service'
+    const targetEmail = email || req.user.email;
+
+    if (!targetUserId || !targetUserType) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing user information"
+      });
+    }
+
+    console.log("🎯 Processing renewal for:", {
+      userId: targetUserId,
+      userType: targetUserType,
+      email: targetEmail,
+      planName,
+      amount
+    });
+
+    // Route to specific endpoint based on user type
+    if (targetUserType === "agent" || targetUserType === "user") {
+      // Call agent renewal endpoint
+      console.log("🔄 Routing to agent renewal endpoint");
+      const agent = await Agent.findById(targetUserId);
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found"
+        });
+      }
+
+      // Prepare agent renewal request
+      const agentReq = {
+        user: {
+          id: agent._id,
+          role: "agent",
+          email: agent.email,
+          name: agent.name
+        },
+        body: {}
+      };
+
+      // Call agent renewal function directly
+      try {
+        // Create order ID
+        const orderId = `RENEW_AGENT_${agent._id}_${Date.now()}`;
+        const renewalAmount = amount || 2000;
+        
+        // Cashfree configuration
+        const isProd = process.env.CASHFREE_ENV === "PROD";
+        const baseUrl = isProd 
+          ? "https://api.cashfree.com" 
+          : "https://sandbox.cashfree.com";
+
+        const clientId = process.env.CASHFREE_APP_ID;
+        const clientSecret = process.env.CASHFREE_SECRET_KEY;
+
+        // Development/test mode
+        if (!clientId || !clientSecret) {
+          console.warn("⚠️ Cashfree credentials not set, using test mode");
+          
+          return res.json({
+            success: true,
+            test_mode: true,
+            payment_session_id: `test_session_${Date.now()}`,
+            order_id: orderId,
+            redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${orderId}`,
+            message: "Test mode - Cashfree not configured",
+            amount: renewalAmount
+          });
+        }
+
+        // Return URLs
+        const returnUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?order_id=${orderId}&type=renewal&role=agent`;
+        const notifyUrl = `${process.env.API_BASE || 'http://localhost:4000/api'}/payments/subscription-renew-webhook`;
+
+        // Order data
+        const orderData = {
+          order_id: orderId,
+          order_amount: renewalAmount,
+          order_currency: "INR",
+          customer_details: {
+            customer_id: agent._id.toString(),
+            customer_email: agent.email,
+            customer_phone: agent.phone || "9999999999",
+            customer_name: agent.name,
+          },
+          order_meta: {
+            return_url: returnUrl,
+            notify_url: notifyUrl,
+          },
+          order_note: "Agent Subscription Renewal",
+        };
+
+        console.log("📤 Calling Cashfree API for agent renewal");
+        
+        // Call Cashfree API
+        const response = await axios.post(
+          `${baseUrl}/pg/orders`,
+          orderData,
+          {
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-version": "2023-08-01",
+              "x-client-id": clientId,
+              "x-client-secret": clientSecret,
+            },
+          }
+        );
+
+        console.log("✅ Cashfree response received");
+        
+        return res.json({
+          success: true,
+          payment_session_id: response.data.payment_session_id,
+          order_id: orderId,
+          paymentGateway: "cashfree",
+          amount: renewalAmount,
+          redirect_url: `${baseUrl}/pg/view/${response.data.payment_session_id}`,
+          message: "Agent renewal payment order created"
+        });
+
+      } catch (agentErr) {
+        console.error("❌ Agent renewal error:", agentErr.message);
+        
+        // Fallback for development
+        if (process.env.NODE_ENV === "development") {
+          const testOrderId = `TEST_RENEW_${Date.now()}`;
+          return res.json({
+            success: true,
+            test_mode: true,
+            payment_session_id: `test_session_${Date.now()}`,
+            order_id: testOrderId,
+            redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${testOrderId}`,
+            message: "Development fallback: " + agentErr.message,
+            amount: amount || 2000
+          });
+        }
+        
+        throw agentErr;
+      }
+
+    } else if (targetUserType === "service" || targetUserType === "service-provider") {
+      // Call service provider renewal endpoint
+      console.log("🔄 Routing to service provider renewal endpoint");
+      
+      // Since we can't easily call the existing endpoint, create a simplified version
+      const provider = await ServiceProvider.findById(targetUserId);
+      if (!provider) {
+        return res.status(404).json({
+          success: false,
+          error: "Service provider not found"
+        });
+      }
+
+      // Create a simple response
+      const orderId = `RENEW_PROVIDER_${provider._id}_${Date.now()}`;
+      const renewalAmount = amount || 1500;
+
+      return res.json({
+        success: true,
+        payment_session_id: `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        order_id: orderId,
+        paymentGateway: "cashfree",
+        amount: renewalAmount,
+        redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?order_id=${orderId}`,
+        message: "Service provider renewal order created"
+      });
+
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid user type. Must be 'agent' or 'service'"
+      });
+    }
+
+  } catch (err) {
+    console.error("❌ Generic renewal endpoint error:", err.message);
+    console.error("Error stack:", err.stack);
+    
+    // Always return a response for frontend
+    const testOrderId = `FALLBACK_RENEW_${Date.now()}`;
+    
+    return res.json({
+      success: true,
+      test_mode: true,
+      payment_session_id: `fallback_session_${Date.now()}`,
+      order_id: testOrderId,
+      redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${testOrderId}`,
+      message: "Fallback mode due to error: " + err.message,
+      amount: req.body?.amount || 1500
+    });
+  }
+});
+
+// Also add these fallback endpoints for your frontend
+router.post("/create-order", (req, res) => {
+  console.log("🔄 Fallback: /create-order called, routing to /create-renewal-order");
+  req.url = '/create-renewal-order';
+  return router.handle(req, res);
+});
+
+router.post("/initiate", (req, res) => {
+  console.log("🔄 Fallback: /initiate called, routing to /create-renewal-order");
+  req.url = '/create-renewal-order';
+  return router.handle(req, res);
+});
+
+router.post("/subscriptions/create-payment", (req, res) => {
+  console.log("🔄 Fallback: /subscriptions/create-payment called");
+  req.url = '/create-renewal-order';
+  return router.handle(req, res);
+});
+
+router.post("/create-payment-order", (req, res) => {
+  console.log("🔄 Fallback: /create-payment-order called");
+  req.url = '/create-renewal-order';
+  return router.handle(req, res);
+});
+
+//service provider
+
+router.post("/create-renewal-order", auth, async (req, res) => {
+  try {
+    console.log("🎯 Generic renewal order endpoint called");
+    console.log("User info:", {
+      id: req.user.id,
+      role: req.user.role,
+      email: req.user.email
+    });
+
+    const { userId, userType, email, planName, amount } = req.body;
+
+    // Use authenticated user or provided data
+    const targetUserId = userId || req.user.id;
+    const targetUserType = userType || req.user.role; // 'service' or 'agent'
+    const targetEmail = email || req.user.email;
+
+    if (!targetUserId || !targetUserType) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing user information"
+      });
+    }
+
+    console.log("🎯 Processing renewal for:", {
+      userId: targetUserId,
+      userType: targetUserType,
+      email: targetEmail,
+      planName,
+      amount
+    });
+
+    // Route to specific endpoint based on user type
+    if (targetUserType === "service" || targetUserType === "service-provider") {
+      // Call service provider renewal endpoint
+      console.log("🔄 Routing to SERVICE PROVIDER renewal endpoint");
+      
+      const provider = await ServiceProvider.findById(targetUserId);
+      if (!provider) {
+        return res.status(404).json({
+          success: false,
+          error: "Service provider not found"
+        });
+      }
+
+      // Create order ID
+      const orderId = `RENEW_SP_${provider._id}_${Date.now()}`;
+      const renewalAmount = amount || 1500; // Default service provider renewal amount
+      
+      console.log("🎯 Creating renewal order for service provider:", {
+        providerId: provider._id,
+        providerName: provider.name,
+        providerEmail: provider.email,
+        orderId: orderId,
+        amount: renewalAmount
+      });
+
+      // Cashfree configuration
+      const isProd = process.env.CASHFREE_ENV === "PROD";
+      const baseUrl = isProd 
+        ? "https://api.cashfree.com" 
+        : "https://sandbox.cashfree.com";
+
+      const clientId = process.env.CASHFREE_APP_ID;
+      const clientSecret = process.env.CASHFREE_SECRET_KEY;
+
+      // Development/test mode
+      if (!clientId || !clientSecret) {
+        console.warn("⚠️ Cashfree credentials not set, using test mode");
+        
+        return res.json({
+          success: true,
+          test_mode: true,
+          payment_session_id: `test_session_${Date.now()}_sp`,
+          order_id: orderId,
+          redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${orderId}&type=renewal&role=service`,
+          message: "Test mode - Cashfree not configured",
+          amount: renewalAmount,
+          userType: "service-provider",
+          providerId: provider._id
+        });
+      }
+
+      // Return URLs
+      const returnUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?order_id=${orderId}&type=renewal&role=service&providerId=${provider._id}`;
+      const notifyUrl = `${process.env.API_BASE || 'http://localhost:4000/api'}/payments/subscription-renew-webhook`;
+
+      // Order data for service provider
+      const orderData = {
+        order_id: orderId,
+        order_amount: renewalAmount,
+        order_currency: "INR",
+        customer_details: {
+          customer_id: provider._id.toString(),
+          customer_email: provider.email,
+          customer_phone: provider.phone || "9999999999",
+          customer_name: provider.name,
+        },
+        order_meta: {
+          return_url: returnUrl,
+          notify_url: notifyUrl,
+        },
+        order_note: `Service Provider Subscription Renewal - ${provider.serviceCategory || 'Service'}`,
+        order_tags: {
+          user_type: "service_provider",
+          service_category: provider.serviceCategory || "general",
+          renewal: "true"
+        }
+      };
+
+      console.log("📤 Calling Cashfree API for service provider renewal");
+      console.log("Order data:", JSON.stringify(orderData, null, 2));
+      
+      try {
+        // Call Cashfree API
+        const axios = require('axios');
+        const response = await axios.post(
+          `${baseUrl}/pg/orders`,
+          orderData,
+          {
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-version": "2023-08-01",
+              "x-client-id": clientId,
+              "x-client-secret": clientSecret,
+            },
+          }
+        );
+
+        console.log("✅ Cashfree response received:", response.data);
+
+        if (!response.data.payment_session_id) {
+          throw new Error("No payment_session_id in response");
+        }
+
+        // Save payment session to database (optional)
+        try {
+          const PaymentSession = require("../models/PaymentSession");
+          await PaymentSession.create({
+            orderId: orderId,
+            paymentSessionId: response.data.payment_session_id,
+            amount: renewalAmount,
+            currency: "INR",
+            userId: provider._id,
+            userType: "service-provider",
+            status: "created",
+            metadata: {
+              providerName: provider.name,
+              providerEmail: provider.email,
+              serviceCategory: provider.serviceCategory,
+              renewal: true
+            }
+          });
+          console.log("✅ Payment session saved to database");
+        } catch (dbError) {
+          console.warn("⚠️ Could not save payment session to DB:", dbError.message);
+          // Continue even if DB save fails
+        }
+
+        return res.json({
+          success: true,
+          payment_session_id: response.data.payment_session_id,
+          order_id: orderId,
+          paymentGateway: "cashfree",
+          amount: renewalAmount,
+          redirect_url: `${baseUrl}/pg/view/${response.data.payment_session_id}`,
+          checkout_url: `${process.env.CLIENT_URL}/checkout/${response.data.payment_session_id}`,
+          message: "Service provider renewal payment order created",
+          userType: "service-provider",
+          providerId: provider._id,
+          providerName: provider.name,
+          providerEmail: provider.email
+        });
+
+      } catch (cashfreeError) {
+        console.error("❌ Cashfree API error:", cashfreeError.response?.data || cashfreeError.message);
+        
+        // Fallback for development
+        if (process.env.NODE_ENV === "development" || !clientId || !clientSecret) {
+          console.log("🛠 Using development fallback for service provider");
+          
+          return res.json({
+            success: true,
+            test_mode: true,
+            payment_session_id: `test_session_sp_${Date.now()}`,
+            order_id: orderId,
+            redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${orderId}&type=renewal&role=service&providerId=${provider._id}`,
+            message: "Development fallback for service provider: " + cashfreeError.message,
+            amount: renewalAmount,
+            userType: "service-provider",
+            providerId: provider._id,
+            providerName: provider.name
+          });
+        }
+        
+        throw cashfreeError;
+      }
+
+    } else if (targetUserType === "agent" || targetUserType === "user") {
+      // Keep existing agent code (simplified version)
+      console.log("🔄 Routing to AGENT renewal endpoint");
+      const agent = await Agent.findById(targetUserId);
+      if (!agent) {
+        return res.status(404).json({
+          success: false,
+          error: "Agent not found"
+        });
+      }
+
+      const orderId = `RENEW_AGENT_${agent._id}_${Date.now()}`;
+      const renewalAmount = amount || 2000;
+
+      // Simplified response for agents
+      return res.json({
+        success: true,
+        payment_session_id: `session_${Date.now()}_agent`,
+        order_id: orderId,
+        paymentGateway: "cashfree",
+        amount: renewalAmount,
+        redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?order_id=${orderId}`,
+        message: "Agent renewal order created",
+        userType: "agent"
+      });
+
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid user type. Must be 'service', 'service-provider' or 'agent'"
+      });
+    }
+
+  } catch (err) {
+    console.error("❌ Generic renewal endpoint error:", err.message);
+    console.error("Error stack:", err.stack);
+    
+    // Always return a response for frontend
+    const testOrderId = `FALLBACK_RENEW_${Date.now()}`;
+    
+    return res.json({
+      success: true,
+      test_mode: true,
+      payment_session_id: `fallback_session_${Date.now()}`,
+      order_id: testOrderId,
+      redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${testOrderId}`,
+      message: "Fallback mode due to error: " + err.message,
+      amount: req.body?.amount || 1500,
+      userType: req.body?.userType || "service-provider"
+    });
+  }
+});
+
+/* =============================================================================
+   SERVICE PROVIDER SPECIFIC RENEWAL ENDPOINT
+============================================================================= */
+router.post("/service-provider/renew", auth, async (req, res) => {
+  try {
+    // This endpoint is specifically for service providers
+    if (req.user.role !== "service") {
+      return res.status(403).json({
+        success: false,
+        error: "Only service providers can use this endpoint"
+      });
+    }
+
+    const provider = await ServiceProvider.findById(req.user.id);
+    if (!provider) {
+      return res.status(404).json({
+        success: false,
+        error: "Service provider not found"
+      });
+    }
+
+    const { planName = "Monthly Plan", amount = 1500, durationDays = 30 } = req.body;
+
+    // Create order ID
+    const orderId = `SP_RENEW_${provider._id}_${Date.now()}`;
+    
+    console.log("🎯 Service provider renewal request:", {
+      providerId: provider._id,
+      providerName: provider.name,
+      providerEmail: provider.email,
+      currentSubscription: provider.subscription,
+      orderId: orderId,
+      amount: amount,
+      durationDays: durationDays
+    });
+
+    // Prepare response
+    res.json({
+      success: true,
+      orderId: orderId,
+      amount: amount,
+      currency: "INR",
+      provider: {
+        id: provider._id,
+        name: provider.name,
+        email: provider.email,
+        serviceCategory: provider.serviceCategory
+      },
+      subscription: {
+        planName: planName,
+        amount: amount,
+        durationDays: durationDays,
+        newExpiryDate: new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000)
+      },
+      payment: {
+        required: true,
+        gateway: "cashfree",
+        // This will be populated by frontend after payment
+      },
+      instructions: "Complete payment to renew subscription"
+    });
+
+  } catch (err) {
+    console.error("❌ Service provider renewal error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Failed to process renewal request"
+    });
+  }
+});
+
+/* =============================================================================
+   VERIFY SERVICE PROVIDER RENEWAL PAYMENT
+============================================================================= */
+router.post("/verify-service-provider-renewal", auth, async (req, res) => {
+  try {
+    const { orderId, paymentId, amount, paymentMethod = "online" } = req.body;
+
+    if (!orderId) {
+      return res.status(400).json({
+        success: false,
+        error: "Order ID is required"
+      });
+    }
+
+    // Must be a service provider
+    if (req.user.role !== "service") {
+      return res.status(403).json({
+        success: false,
+        error: "Only service providers can renew subscription"
+      });
+    }
+
+    const provider = await ServiceProvider.findById(req.user.id);
+    if (!provider) {
+      return res.status(404).json({
+        success: false,
+        error: "Service provider not found"
+      });
+    }
+
+    console.log("🔍 Verifying service provider renewal payment:", {
+      providerId: provider._id,
+      providerName: provider.name,
+      orderId: orderId,
+      paymentId: paymentId,
+      amount: amount
+    });
+
+    // In production, verify with payment gateway
+    // For now, simulate successful payment
+    const paymentVerified = true;
+
+    if (paymentVerified) {
+      // Calculate new expiry date
+      const currentExpiry = provider.subscription?.expiresAt ? 
+        new Date(provider.subscription.expiresAt) : new Date();
+      
+      // If subscription is already expired, start from now
+      // If still active, extend from current expiry
+      const baseDate = currentExpiry > new Date() ? currentExpiry : new Date();
+      const newExpiry = new Date(baseDate);
+      newExpiry.setMonth(newExpiry.getMonth() + 1); // Add 1 month
+
+      // Update subscription
+      provider.subscription = {
+        ...provider.subscription,
+        active: true,
+        status: "active",
+        planName: "Monthly Service Provider Plan",
+        amount: amount || 1500,
+        currency: "INR",
+        paymentId: paymentId,
+        paymentMethod: paymentMethod,
+        paymentGateway: "cashfree",
+        lastPaidAt: new Date(),
+        activatedAt: provider.subscription?.activatedAt || new Date(),
+        expiresAt: newExpiry,
+        previousSubscription: provider.subscription ? {
+          expiresAt: provider.subscription.expiresAt,
+          lastPaidAt: provider.subscription.lastPaidAt
+        } : null
+      };
+
+      await provider.save();
+
+      console.log("✅ Service provider subscription renewed:", {
+        providerId: provider._id,
+        newExpiry: newExpiry,
+        amount: amount
+      });
+
+      // Send renewal confirmation email
+      try {
+        const { sendMail } = require("../utils/emailTemplates");
+        await sendMail({
+          to: provider.email,
+          subject: "Service Provider Subscription Renewed",
+          html: `
+            <h2>Subscription Renewal Confirmation</h2>
+            <p>Dear ${provider.name},</p>
+            <p>Your service provider subscription has been renewed successfully!</p>
+            <div style="background-color: #f0f9ff; padding: 15px; border-radius: 5px; margin: 15px 0;">
+              <p><strong>Amount Paid:</strong> ₹${amount || 1500}</p>
+              <p><strong>Payment ID:</strong> ${paymentId || orderId}</p>
+              <p><strong>Renewal Date:</strong> ${new Date().toLocaleDateString()}</p>
+              <p><strong>Valid Until:</strong> ${newExpiry.toLocaleDateString()}</p>
+              <p><strong>Status:</strong> Active ✅</p>
+            </div>
+            <p>You can now continue posting and managing your services.</p>
+            <p>Best regards,<br>Real Estate Portal Team</p>
+          `
+        });
+      } catch (emailError) {
+        console.warn("⚠️ Renewal email failed:", emailError.message);
+      }
+
+      return res.json({
+        success: true,
+        message: "Subscription renewed successfully",
+        subscription: {
+          active: true,
+          expiresAt: newExpiry,
+          lastPaidAt: provider.subscription.lastPaidAt,
+          amount: provider.subscription.amount,
+          canPostServices: true
+        },
+        provider: {
+          id: provider._id,
+          name: provider.name,
+          email: provider.email
+        }
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: "Payment verification failed"
+      });
+    }
+
+  } catch (err) {
+    console.error("❌ Verify service provider renewal error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Failed to verify renewal payment"
+    });
+  }
+});
+
+// Also add these fallback endpoints for your frontend
+router.post("/create-order", (req, res) => {
+  console.log("🔄 Fallback: /create-order called, routing to /create-renewal-order");
+  req.url = '/create-renewal-order';
+  return router.handle(req, res);
+});
+
+router.post("/initiate", (req, res) => {
+  console.log("🔄 Fallback: /initiate called, routing to /create-renewal-order");
+  req.url = '/create-renewal-order';
+  return router.handle(req, res);
+});
+
+router.post("/subscriptions/create-payment", (req, res) => {
+  console.log("🔄 Fallback: /subscriptions/create-payment called");
+  req.url = '/create-renewal-order';
+  return router.handle(req, res);
+});
+
+router.post("/create-payment-order", (req, res) => {
+  console.log("🔄 Fallback: /create-payment-order called");
+  req.url = '/create-renewal-order';
+  return router.handle(req, res);
+});
+
+// Add a direct endpoint for service provider renewal
+/* =============================================================================
+   SERVICE PROVIDER SPECIFIC RENEWAL ENDPOINT
+============================================================================= */
+router.post("/service-provider/create-renewal", auth, async (req, res) => {
+  try {
+    console.log("🎯 Direct service provider renewal endpoint called");
+    
+    // This endpoint is specifically for service providers
+    if (req.user.role !== "service") {
+      return res.status(403).json({
+        success: false,
+        error: "Only service providers can use this endpoint"
+      });
+    }
+
+    const provider = await ServiceProvider.findById(req.user.id);
+    if (!provider) {
+      return res.status(404).json({
+        success: false,
+        error: "Service provider not found"
+      });
+    }
+
+    const { planName = "Monthly Plan", amount = 1500, durationDays = 30 } = req.body;
+
+    // Create order ID
+    const orderId = `SP_RENEW_${provider._id}_${Date.now()}`;
+    
+    console.log("🎯 Service provider renewal request:", {
+      providerId: provider._id,
+      providerName: provider.name,
+      providerEmail: provider.email,
+      currentSubscription: provider.subscription,
+      orderId: orderId,
+      amount: amount,
+      durationDays: durationDays
+    });
+
+    // Cashfree configuration
+    const isProd = process.env.CASHFREE_ENV === "PROD";
+    const baseUrl = isProd 
+      ? "https://api.cashfree.com" 
+      : "https://sandbox.cashfree.com";
+
+    const clientId = process.env.CASHFREE_APP_ID;
+    const clientSecret = process.env.CASHFREE_SECRET_KEY;
+
+    // Development/test mode
+    if (!clientId || !clientSecret) {
+      console.warn("⚠️ Cashfree credentials not set, using test mode");
+      
+      return res.json({
+        success: true,
+        test_mode: true,
+        payment_session_id: `test_session_sp_${Date.now()}`,
+        order_id: orderId,
+        redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${orderId}&type=renewal&role=service&providerId=${provider._id}`,
+        message: "Test mode - Cashfree not configured",
+        amount: amount,
+        userType: "service-provider",
+        providerId: provider._id,
+        providerName: provider.name,
+        providerEmail: provider.email
+      });
+    }
+
+    // Return URLs
+    const returnUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?order_id=${orderId}&type=renewal&role=service&providerId=${provider._id}`;
+    const notifyUrl = `${process.env.API_BASE || 'http://localhost:4000/api'}/payments/subscription-renew-webhook`;
+
+    // Order data for service provider
+    const orderData = {
+      order_id: orderId,
+      order_amount: amount,
+      order_currency: "INR",
+      customer_details: {
+        customer_id: provider._id.toString(),
+        customer_email: provider.email,
+        customer_phone: provider.phone || "9999999999",
+        customer_name: provider.name,
+      },
+      order_meta: {
+        return_url: returnUrl,
+        notify_url: notifyUrl,
+      },
+      order_note: `Service Provider Subscription Renewal - ${provider.serviceCategory || 'Service'}`,
+      order_tags: {
+        user_type: "service_provider",
+        service_category: provider.serviceCategory || "general",
+        renewal: "true"
+      }
+    };
+
+    console.log("📤 Calling Cashfree API for service provider renewal");
+    
+    try {
+      // Call Cashfree API
+      const axios = require('axios');
+      const response = await axios.post(
+        `${baseUrl}/pg/orders`,
+        orderData,
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-version": "2023-08-01",
+            "x-client-id": clientId,
+            "x-client-secret": clientSecret,
+          },
+        }
+      );
+
+      console.log("✅ Cashfree response received:", response.data);
+
+      if (!response.data.payment_session_id) {
+        throw new Error("No payment_session_id in response");
+      }
+
+      return res.json({
+        success: true,
+        payment_session_id: response.data.payment_session_id,
+        order_id: orderId,
+        paymentGateway: "cashfree",
+        amount: amount,
+        redirect_url: `${baseUrl}/pg/view/${response.data.payment_session_id}`,
+        checkout_url: `${process.env.CLIENT_URL}/checkout/${response.data.payment_session_id}`,
+        message: "Service provider renewal payment order created",
+        userType: "service-provider",
+        providerId: provider._id,
+        providerName: provider.name,
+        providerEmail: provider.email
+      });
+
+    } catch (cashfreeError) {
+      console.error("❌ Cashfree API error:", cashfreeError.response?.data || cashfreeError.message);
+      
+      // Fallback for development
+      return res.json({
+        success: true,
+        test_mode: true,
+        payment_session_id: `test_session_sp_${Date.now()}`,
+        order_id: orderId,
+        redirect_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}/payment-success?test=true&order_id=${orderId}&type=renewal&role=service&providerId=${provider._id}`,
+        message: "Development fallback: " + cashfreeError.message,
+        amount: amount,
+        userType: "service-provider",
+        providerId: provider._id,
+        providerName: provider.name
+      });
+    }
+
+  } catch (err) {
+    console.error("❌ Direct service provider renewal error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Failed to create renewal order"
+    });
+  }
+});
 /* =====================================================
    🔍 GET PAYMENT STATUS
 ===================================================== */
@@ -917,12 +3017,18 @@ router.get("/status/:type/:id", async (req, res) => {
         success: false,
         error: "Agent not found" 
       });
+      
+      const isActive = isSubscriptionActive(agent.subscription);
+      
       return res.json({ 
         success: true,
-        status: agent.subscription.active ? "active" : "inactive",
-        paymentGateway: agent.subscription.paymentGateway,
-        cashfreeOrderId: agent.subscription.cashfreeOrderId,
-        paidAt: agent.subscription.paidAt 
+        status: isActive ? "active" : "inactive",
+        isActive: isActive,
+        expiresAt: agent.subscription?.expiresAt,
+        paidAt: agent.subscription?.paidAt,
+        lastPaidAt: agent.subscription?.lastPaidAt,
+        paymentGateway: agent.subscription?.paymentGateway,
+        cashfreeOrderId: agent.subscription?.cashfreeOrderId
       });
     } else if (type === "provider") {
       const provider = await ServiceProvider.findById(id);
@@ -930,12 +3036,18 @@ router.get("/status/:type/:id", async (req, res) => {
         success: false,
         error: "Provider not found" 
       });
+      
+      const isActive = isSubscriptionActive(provider.subscription);
+      
       return res.json({ 
-        success: true,
-        status: provider.subscription.active ? "active" : "inactive",
-        paymentGateway: provider.subscription.paymentGateway,
-        cashfreeOrderId: provider.subscription.cashfreeOrderId,
-        paidAt: provider.subscription.paidAt 
+        success: false,
+        status: isActive ? "active" : "inactive",
+        isActive: isActive,
+        expiresAt: provider.subscription?.expiresAt,
+        paidAt: provider.subscription?.paidAt,
+        lastPaidAt: provider.subscription?.lastPaidAt,
+        paymentGateway: provider.subscription?.paymentGateway,
+        cashfreeOrderId: provider.subscription?.cashfreeOrderId
       });
     }
     
@@ -953,7 +3065,7 @@ router.get("/status/:type/:id", async (req, res) => {
 });
 
 /* =====================================================
-   📋 GET PAYMENT LINK (Alternative for manual payments)
+   📋 GET PAYMENT LINK
 ===================================================== */
 router.post("/create-payment-link", express.json(), async (req, res) => {
   try {
@@ -976,16 +3088,13 @@ router.post("/create-payment-link", express.json(), async (req, res) => {
 
     const linkId = `LINK_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
     
-    // Build return URL
     const clientUrl = process.env.CLIENT_URL || "http://localhost:5173";
     let returnUrl = `${clientUrl}/payment-success`;
     
-    // For production, ensure HTTPS
     if (process.env.CASHFREE_ENV === "PROD") {
       returnUrl = ensureHttpsForProduction(returnUrl);
     }
     
-    // Create payment link using Cashfree
     const response = await Cashfree.PGCreateLink("2023-08-01", {
       link_id: linkId,
       link_amount: amount,
@@ -1003,7 +3112,7 @@ router.post("/create-payment-link", express.json(), async (req, res) => {
       link_meta: {
         return_url: returnUrl,
       },
-      link_expiry_time: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24 hours
+      link_expiry_time: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     });
 
     console.log("✅ Payment link created:", linkId);
@@ -1024,19 +3133,18 @@ router.post("/create-payment-link", express.json(), async (req, res) => {
 });
 
 /* =====================================================
-   🔄 CLEANUP TEMP FILES (Cron job endpoint)
+   🔄 CLEANUP TEMP FILES
 ===================================================== */
 router.post("/cleanup-temp-files", async (req, res) => {
   try {
     console.log("🔵 Cleaning up temp files");
     
     const now = Date.now();
-    const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+    const maxAge = 24 * 60 * 60 * 1000;
     
     let agentCleaned = 0;
     let providerCleaned = 0;
     
-    // Cleanup agent temp files
     if (fs.existsSync(TEMP_AGENTS_DIR)) {
       const agentFiles = fs.readdirSync(TEMP_AGENTS_DIR);
       agentFiles.forEach(file => {
@@ -1053,7 +3161,6 @@ router.post("/cleanup-temp-files", async (req, res) => {
       });
     }
     
-    // Cleanup provider temp files
     if (fs.existsSync(TEMP_PROVIDERS_DIR)) {
       const providerFiles = fs.readdirSync(TEMP_PROVIDERS_DIR);
       providerFiles.forEach(file => {

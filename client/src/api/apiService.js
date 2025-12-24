@@ -101,7 +101,7 @@ updateService: (id, formData) =>
 
   myServices: () => api.get("/service-provider/my-services"),
   deleteService: (id) => api.delete(`/service-provider/service/${id}`),
-  myServiceEnquiries: () => api.get("/service-enquiries/my-enquiries"),
+  myServiceEnquiries: () => api.get("/service-provider/my-service-enquiries"),
 
 };
 

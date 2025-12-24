@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { ServiceProviderAPI } from "../api/apiService";
 import { useNavigate } from "react-router-dom";
 import { Link } from "react-router-dom";
+import api from "../api/api";
+
 
 export default function ServiceProviderLogin() {
   const [email, setEmail] = useState("");
@@ -12,33 +14,73 @@ export default function ServiceProviderLogin() {
 
   const nav = useNavigate();
 
-  const handleLogin = async (e) => {
-    e.preventDefault();
-    setMsg("");
-    setLoading(true);
+  const checkSubscriptionValidity = (subscription) => {
+    if (!subscription) return false;
+    
+    // Check if subscription exists and is active
+    const isActive = subscription.active === true || subscription.active === "true";
+    if (!isActive) return false;
+    
+    // Check expiration date
+    if (subscription.expiresAt) {
+      const expiresAt = new Date(subscription.expiresAt);
+      const now = new Date();
+      const isExpired = expiresAt < now;
+      return !isExpired;
+    }
+    
+    return true;
+  };
 
-    try {
-      const { data } = await ServiceProviderAPI.login({ email, password });
+const handleLogin = async (e) => {
+  e.preventDefault();
+  setMsg("");
+  setLoading(true);
 
-      localStorage.setItem("providerToken", data.token);
-      localStorage.setItem(
-        "user",
-        JSON.stringify({
-          ...data.provider,
-          isService: true,
-          isAgent: false,
-          isAdmin: false,
-        })
-      );
+  try {
+    // 🔥 clear old data
+    localStorage.clear();
+    delete api.defaults.headers.Authorization;
 
-      setMsg("✔ Login successful!");
-      setTimeout(() => nav("/service-home"), 700);
-    } catch (err) {
-      setMsg("❌ " + (err.response?.data?.error || "Login failed"));
+    const res = await api.post("/service-provider/login", {
+      email: email.toLowerCase().trim(),
+      password: password.trim(),
+    });
+
+    const { token, provider } = res.data;
+
+    if (!token || !provider) {
+      throw new Error("Invalid login response");
     }
 
+    // ✅ SAVE TOKEN
+    localStorage.setItem("providerToken", token);
+    localStorage.setItem("token", token);
+    api.defaults.headers.Authorization = `Bearer ${token}`;
+
+    // ✅ SAVE USER (THIS IS CRITICAL)
+    localStorage.setItem(
+      "user",
+      JSON.stringify({
+        _id: provider._id,
+        name: provider.name,
+        email: provider.email,
+        isService: true,
+        isAgent: false,
+        isAdmin: false,
+        isMarketing: false,
+      })
+    );
+
     setLoading(false);
-  };
+    nav("/service-home"); // ✅ redirect
+
+  } catch (err) {
+    console.error("Service login failed:", err);
+    setMsg("❌ Login failed");
+    setLoading(false);
+  }
+};
 
   const handleForgotPassword = async () => {
     if (!email) {
@@ -87,6 +129,7 @@ export default function ServiceProviderLogin() {
                 style={styles.input}
                 required
                 type="email"
+                disabled={loading}
               />
 
               <input
@@ -96,20 +139,56 @@ export default function ServiceProviderLogin() {
                 placeholder="Password"
                 style={styles.input}
                 required
+                disabled={loading}
               />
 
-              <button type="submit" disabled={loading} style={styles.button}>
-                {loading ? "Logging in…" : "Login"}
+              <button 
+                type="submit" 
+                disabled={loading} 
+                style={{
+                  ...styles.button,
+                  opacity: loading ? 0.7 : 1,
+                  cursor: loading ? "not-allowed" : "pointer"
+                }}
+              >
+                {loading ? (
+                  <>
+                    <span style={styles.spinner}></span> Logging in...
+                  </>
+                ) : (
+                  "Login"
+                )}
               </button>
 
               <div style={styles.linksRow}>
-                <span onClick={() => setMode("forgot")} style={styles.link}>
+                <span 
+                  onClick={() => !loading && setMode("forgot")} 
+                  style={{
+                    ...styles.link,
+                    cursor: loading ? "not-allowed" : "pointer",
+                    opacity: loading ? 0.6 : 1
+                  }}
+                >
                   Forgot Password?
                 </span>
 
-                <Link to="/service-provider-register" style={styles.link}>
+                <Link 
+                  to="/service-provider-register" 
+                  style={{
+                    ...styles.link,
+                    pointerEvents: loading ? "none" : "auto",
+                    opacity: loading ? 0.6 : 1
+                  }}
+                >
                   New Registration
                 </Link>
+              </div>
+
+              {/* Subscription Info */}
+              <div style={styles.infoNote}>
+                <p style={styles.infoText}>
+                  ⓘ A valid subscription is required to access all features.
+                </p>
               </div>
             </>
           ) : (
@@ -121,25 +200,67 @@ export default function ServiceProviderLogin() {
                 style={styles.input}
                 required
                 type="email"
+                disabled={loading}
               />
 
               <button
                 type="button"
                 disabled={loading}
                 onClick={handleForgotPassword}
-                style={styles.button}
+                style={{
+                  ...styles.button,
+                  opacity: loading ? 0.7 : 1,
+                  cursor: loading ? "not-allowed" : "pointer"
+                }}
               >
-                {loading ? "Sending…" : "Send Reset Link"}
+                {loading ? (
+                  <>
+                    <span style={styles.spinner}></span> Sending...
+                  </>
+                ) : (
+                  "Send Reset Link"
+                )}
               </button>
 
-              <span onClick={() => setMode("login")} style={styles.backLink}>
+              <span 
+                onClick={() => !loading && setMode("login")} 
+                style={{
+                  ...styles.backLink,
+                  cursor: loading ? "not-allowed" : "pointer",
+                  opacity: loading ? 0.6 : 1
+                }}
+              >
                 ← Back to Login
               </span>
             </>
           )}
         </form>
 
-        {msg && <p style={styles.message}>{msg}</p>}
+        {msg && (
+          <p style={{
+            ...styles.message,
+            color: msg.includes("✅") ? "#4ade80" : msg.includes("❌") ? "#f87171" : "#fff",
+            background: msg.includes("✅") ? "rgba(74, 222, 128, 0.1)" : msg.includes("❌") ? "rgba(248, 113, 113, 0.1)" : "transparent",
+            border: msg.includes("✅") ? "1px solid rgba(74, 222, 128, 0.3)" : 
+                   msg.includes("❌") ? "1px solid rgba(248, 113, 113, 0.3)" : "none",
+            padding: msg.includes("✅") || msg.includes("❌") ? "10px 15px" : "0",
+            borderRadius: msg.includes("✅") || msg.includes("❌") ? "8px" : "0"
+          }}>
+            {msg}
+          </p>
+        )}
+
+        {/* Debug Info (Development only) */}
+        {process.env.NODE_ENV === 'development' && mode === "login" && (
+          <div style={styles.debugInfo}>
+            <p style={styles.debugText}>
+              API: {import.meta.env.VITE_API_BASE || 'http://localhost:4000/api'}
+            </p>
+            <p style={styles.debugText}>
+              Endpoint: /service-provider/login
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -219,15 +340,19 @@ const styles = {
     marginTop: 15,
     fontWeight: 600,
     transition: "0.25s",
-    "&:hover": {
-      transform: "translateY(-2px)",
-      boxShadow: "0 6px 20px rgba(255, 81, 47, 0.4)",
-    },
-    "&:disabled": {
-      opacity: 0.6,
-      cursor: "not-allowed",
-      transform: "none",
-    },
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "10px",
+  },
+
+  spinner: {
+    width: "18px",
+    height: "18px",
+    border: "3px solid rgba(255, 255, 255, 0.3)",
+    borderTop: "3px solid white",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite",
   },
 
   linksRow: {
@@ -242,9 +367,6 @@ const styles = {
     cursor: "pointer",
     textDecoration: "underline",
     transition: "0.2s",
-    "&:hover": {
-      color: "#fff",
-    },
   },
 
   backLink: {
@@ -255,17 +377,42 @@ const styles = {
     display: "block",
     textDecoration: "underline",
     transition: "0.2s",
-    "&:hover": {
-      color: "#ffd1dc",
-    },
   },
 
   message: {
     marginTop: 15,
-    color: "#fff",
     fontSize: 14,
     fontWeight: 500,
     minHeight: "20px",
+  },
+
+  infoNote: {
+    marginTop: 15,
+    padding: "10px",
+    background: "rgba(255, 255, 255, 0.08)",
+    borderRadius: "8px",
+    border: "1px solid rgba(255, 255, 255, 0.1)",
+  },
+
+  infoText: {
+    margin: 0,
+    fontSize: "12px",
+    color: "#e6e6e6",
+    lineHeight: "1.4",
+  },
+
+  debugInfo: {
+    marginTop: "15px",
+    padding: "8px",
+    background: "rgba(0, 0, 0, 0.2)",
+    borderRadius: "6px",
+    fontSize: "11px",
+    color: "#b3b3b3",
+    fontFamily: "monospace",
+  },
+
+  debugText: {
+    margin: "3px 0",
   },
 };
 
@@ -286,6 +433,43 @@ styleSheet.insertRule(
 @keyframes fadeIn {
   from { opacity: 0; transform: scale(0.96); }
   to { opacity: 1; transform: scale(1); }
+}`,
+  styleSheet.cssRules.length
+);
+
+styleSheet.insertRule(
+  `
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}`,
+  styleSheet.cssRules.length
+);
+
+// Add CSS hover effects
+styleSheet.insertRule(
+  `
+input:focus {
+  border-color: #ff512f;
+  background: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 0 0 2px rgba(255, 81, 47, 0.3);
+}`,
+  styleSheet.cssRules.length
+);
+
+styleSheet.insertRule(
+  `
+button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(255, 81, 47, 0.4);
+}`,
+  styleSheet.cssRules.length
+);
+
+styleSheet.insertRule(
+  `
+.link:hover, .backLink:hover {
+  color: #ffd1dc;
 }`,
   styleSheet.cssRules.length
 );

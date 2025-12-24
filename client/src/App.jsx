@@ -204,11 +204,11 @@ export default function App() {
               <Link to="/marketing-executive/register">Register</Link>
 
               <p className="menu-title">Login</p>
-              <Link to="/agent-login">Agent Login</Link>
+              <Link to="/agent-login">Property Dealer Login</Link>
               <Link to="/service-provider-login">Service Login</Link>
 
               <p className="menu-title">Register</p>
-              <Link to="/agent-register">Agent Register</Link>
+              <Link to="/agent-register">Property Dealer Register</Link>
               <Link to="/service-provider-register">Service Register</Link>
 
               <Link to="/admin-login">Admin Login</Link>

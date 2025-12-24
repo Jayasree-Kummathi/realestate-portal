@@ -10,14 +10,11 @@ const ServiceProviderSchema = new mongoose.Schema(
 
     role: { type: String, default: "service" },
 
-      resetToken: {
-      type: String,
-      default: null,
-    },
-    resetTokenExpiry: {
-      type: Date,
-      default: null,
-    },
+    /* ================================
+       PASSWORD RESET
+       ================================ */
+    resetToken: { type: String, default: null },
+    resetTokenExpiry: { type: Date, default: null },
 
     serviceTypes: {
       type: [String],
@@ -27,18 +24,9 @@ const ServiceProviderSchema = new mongoose.Schema(
     /* =====================================================
        ⭐ REFERRAL INFORMATION
        ===================================================== */
+    referralMarketingExecutiveName: { type: String, default: null },
+    referralMarketingExecutiveId: { type: String, default: null },
 
-    // 1️⃣ Human-readable referral name/email from registration form
-   referralMarketingExecutiveName: {
-  type: String,
-  default: null,
-},
-
-referralMarketingExecutiveId: {
-  type: String,
-  default: null,
-},
-    // 2️⃣ Actual linked agent (for Admin Dashboard)
     referralAgent: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Agent",
@@ -55,13 +43,25 @@ referralMarketingExecutiveId: {
     },
 
     /* =====================================================
-       SUBSCRIPTION / PAYMENT STATUS
+       SUBSCRIPTION (CASHFREE ✅)
        ===================================================== */
     subscription: {
       active: { type: Boolean, default: false },
-      paidAt: { type: Date, default: null },
-      razorpayOrderId: { type: String, default: null },
-      razorpayPaymentId: { type: String, default: null },
+
+      lastPaidAt: { type: Date },
+      expiresAt: { type: Date },
+
+      amount: { type: Number, default: 1500 },
+      currency: { type: String, default: "INR" },
+
+      paymentGateway: {
+        type: String,
+        enum: ["cashfree"],
+        default: "cashfree",
+      },
+
+      cashfreeOrderId: { type: String },
+      cashfreePaymentId: { type: String },
     },
 
     status: {
@@ -74,14 +74,25 @@ referralMarketingExecutiveId: {
   },
   { timestamps: true }
 );
-  
+
 /* =====================================================
-   🔐 AUTO-HASH PASSWORD BEFORE SAVING USER
+   🔐 AUTO-HASH PASSWORD
 ===================================================== */
 ServiceProviderSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
   this.password = await bcrypt.hash(this.password, 10);
   next();
 });
+
+/* =====================================================
+   ✅ CHECK SUBSCRIPTION VALID
+===================================================== */
+ServiceProviderSchema.methods.isSubscriptionActive = function () {
+  return (
+    this.subscription?.active &&
+    this.subscription?.expiresAt &&
+    this.subscription.expiresAt > new Date()
+  );
+};
 
 module.exports = mongoose.model("ServiceProvider", ServiceProviderSchema);

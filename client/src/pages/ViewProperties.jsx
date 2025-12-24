@@ -1,4 +1,3 @@
-// client/src/pages/ViewProperties.jsx
 import React, { useEffect, useState } from "react";
 import api from "../api/api";
 import { useNavigate } from "react-router-dom";
@@ -10,12 +9,15 @@ export default function ViewProperties() {
   const nav = useNavigate();
 
   // Backend root (not /api)
-  const SERVER_URL = import.meta.env.VITE_API_BASE?.replace("/api", "") || "http://localhost:4000";
+  const SERVER_URL =
+    import.meta.env.VITE_API_BASE?.replace("/api", "") ||
+    "http://localhost:4000";
 
-  // Current logged-in user
+  // Current logged-in user - IMPORTANT: Now agent login sets isAgent: true
   const me = JSON.parse(localStorage.getItem("user") || "{}");
+  const myId = me?.id || me?._id;
   const isAdmin = me?.isAdmin === true;
-  const isAgent = me?.isAgent === true;
+  const isAgent = me?.isAgent === true; // ADD THIS LINE
 
   /* ===========================
       LOAD PROPERTIES
@@ -25,15 +27,9 @@ export default function ViewProperties() {
       try {
         setLoading(true);
 
-        let res;
-
-        if (isAdmin) {
-          // admin sees all active
-          res = await api.get("/properties");
-        } else {
-          // agent sees their own active
-          res = await api.get("/properties/agent/dashboard/list");
-        }
+        const res = isAdmin
+          ? await api.get("/properties")
+          : await api.get("/properties/agent/dashboard/list");
 
         setProperties(res.data || []);
       } catch (err) {
@@ -55,8 +51,9 @@ export default function ViewProperties() {
     try {
       await api.delete(`/properties/${property._id}`);
 
-      // remove from UI
-      setProperties((prev) => prev.filter((p) => p._id !== property._id));
+      setProperties((prev) =>
+        prev.filter((p) => p._id !== property._id)
+      );
 
       alert("Deleted successfully!");
     } catch (err) {
@@ -87,8 +84,12 @@ export default function ViewProperties() {
             const agentId = p.agent?._id || p.agent;
             const ownerId = p.owner?._id || p.owner;
 
-            // who is allowed to edit/delete
-            const canEdit = me?.isAdmin || agentId === me?._id || ownerId === me?._id;
+            // ✅ UPDATED PERMISSION CHECK: Allow agents too
+            const canEdit =
+              isAdmin ||
+              isAgent || // ADD THIS CHECK
+              agentId === myId ||
+              ownerId === myId;
 
             const imageUrl = p.images?.[0]
               ? `${SERVER_URL}${p.images[0]}`
@@ -107,11 +108,14 @@ export default function ViewProperties() {
                 />
 
                 <h3 style={styles.title}>{p.title}</h3>
-                <p style={styles.location}>📍 {p.address || p.areaName || "Unknown"}</p>
-                <p style={styles.price}>₹ {p.price?.toLocaleString("en-IN")}</p>
+                <p style={styles.location}>
+                  📍 {p.address || p.areaName || "Unknown"}
+                </p>
+                <p style={styles.price}>
+                  ₹ {p.price?.toLocaleString("en-IN")}
+                </p>
 
                 <div style={styles.actions}>
-                  {/* ANYONE can view */}
                   <button
                     style={styles.viewBtn}
                     onClick={() => nav(`/property/${p._id}`)}
@@ -119,7 +123,6 @@ export default function ViewProperties() {
                     View
                   </button>
 
-                  {/* AGENT / ADMIN ONLY */}
                   {canEdit && (
                     <>
                       <button
@@ -174,14 +177,14 @@ const styles = {
     borderRadius: 8,
   },
 
-  title: { margin: "10px 0 4px", fontSize: "18px", fontWeight: "600" },
-  location: { margin: 0, color: "#555", fontSize: "14px" },
+  title: { margin: "10px 0 4px", fontSize: 18, fontWeight: 600 },
+  location: { margin: 0, color: "#555", fontSize: 14 },
 
   price: {
     marginTop: 6,
     fontWeight: "bold",
     color: "#2ecc71",
-    fontSize: "16px",
+    fontSize: 16,
   },
 
   actions: {

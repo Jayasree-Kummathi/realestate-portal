@@ -29,13 +29,26 @@ const agentSchema = new mongoose.Schema({
   referralMarketingExecutiveId: { type: String, default: null },
 
   /* ================================
-      SUBSCRIPTION (RAZORPAY)
+      SUBSCRIPTION (FIXED - ADD ALL FIELDS!)
      ================================ */
   subscription: {
     active: { type: Boolean, default: false },
     paidAt: { type: Date },
+    lastPaidAt: { type: Date },
+    expiresAt: { type: Date },
     razorpayOrderId: String,
     razorpayPaymentId: String,
+    // Cashfree fields
+    cashfreeOrderId: String,
+    cashfreePaymentId: String,
+    amount: { type: Number, default: 2000 },
+    currency: { type: String, default: "INR" },
+    paymentGateway: String,
+    paymentStatus: String,
+    // Renewal tracking
+    renewalOrderId: String,
+    renewalGateway: String,
+    lastRenewalDate: Date
   },
 
   /* ================================
@@ -45,6 +58,8 @@ const agentSchema = new mongoose.Schema({
   resetTokenExpiry: { type: Date },
 
   createdAt: { type: Date, default: Date.now },
+  lastLogin: { type: Date },
+  status: { type: String, default: "active" }
 });
 
 /* ===== Password Hashing ===== */

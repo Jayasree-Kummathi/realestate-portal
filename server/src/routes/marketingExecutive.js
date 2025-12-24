@@ -47,6 +47,7 @@ router.post("/register", async (req, res) => {
 /* ===========================================================
    LOGIN MARKETING EXECUTIVE
 =========================================================== */
+// In your login route
 router.post("/login", async (req, res) => {
   try {
     let { email, password } = req.body;
@@ -63,11 +64,11 @@ router.post("/login", async (req, res) => {
     if (!isMatch)
       return res.status(400).json({ message: "Incorrect Password" });
 
-    // ⭐ FIXED ROLE → must match main auth middleware
+    // ⭐ FIXED: Use consistent role name
     const token = jwt.sign(
       {
         id: exec._id,
-        role: "marketingExecutive",  // FIXED
+        role: "marketingExecutive",  // This MUST match auth middleware
         meid: exec.meid,
         email: exec.email
       },
@@ -75,18 +76,21 @@ router.post("/login", async (req, res) => {
       { expiresIn: "7d" }
     );
 
+    // Remove password from response
+    const execWithoutPassword = exec.toObject();
+    delete execWithoutPassword.password;
+
     res.json({
       success: true,
       message: "Login Success",
       token,
-      exec
+      exec: execWithoutPassword
     });
   } catch (err) {
     console.error("ME LOGIN ERROR:", err);
     res.status(500).json({ message: "Server Error", error: err.message });
   }
 });
-
 
 /* ===========================================================
    GET ME PROFILE

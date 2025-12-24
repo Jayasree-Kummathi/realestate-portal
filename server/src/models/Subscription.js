@@ -1,11 +1,79 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
-const subSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  stripeSubscriptionId: { type: String },
-  status: { type: String },
-  currentPeriodEnd: { type: Date },
-  createdAt: { type: Date, default: Date.now }
-});
+const subscriptionSchema = new mongoose.Schema(
+  {
+    /* ======================================
+       WHO OWNS THIS SUBSCRIPTION
+    ====================================== */
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+    },
 
-module.exports = mongoose.model('Subscription', subSchema);
+    userType: {
+      type: String,
+      enum: ["agent", "service-provider"],
+      required: true,
+    },
+
+    /* ======================================
+       PAYMENT DETAILS
+    ====================================== */
+    paymentGateway: {
+      type: String,
+      enum: ["cashfree"], // future: stripe, razorpay
+      default: "cashfree",
+    },
+
+    cashfreeOrderId: { type: String },
+    cashfreePaymentId: { type: String },
+
+    amount: {
+      type: Number,
+      default: 1500,
+    },
+
+    currency: {
+      type: String,
+      default: "INR",
+    },
+
+    status: {
+      type: String,
+      enum: ["active", "expired", "cancelled"],
+      default: "active",
+    },
+
+    /* ======================================
+       TIME PERIOD (MONTHLY)
+    ====================================== */
+    startedAt: {
+      type: Date,
+      required: true,
+      default: Date.now,
+    },
+
+    expiresAt: {
+      type: Date,
+      required: true,
+    },
+
+    /* ======================================
+       SYSTEM
+    ====================================== */
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { timestamps: true }
+);
+
+/* ======================================
+   🔑 HELPERS
+====================================== */
+subscriptionSchema.methods.isActive = function () {
+  return this.status === "active" && this.expiresAt > new Date();
+};
+
+module.exports = mongoose.model("Subscription", subscriptionSchema);

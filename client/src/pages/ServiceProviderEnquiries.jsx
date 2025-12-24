@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import api from "../api/api"; // ✅ Import your api client
+
 import { ServiceProviderAPI } from "../api/apiService";
 
 export default function ServiceProviderEnquiries() {
