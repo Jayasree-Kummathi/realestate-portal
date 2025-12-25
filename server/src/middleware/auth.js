@@ -1,4 +1,5 @@
 const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose"); // Added for ObjectId
 const Agent = require("../models/Agent");
 const ServiceProvider = require("../models/ServiceProvider");
 const MarketingExecutive = require("../models/MarketingExecutive");
@@ -126,56 +127,55 @@ async function auth(req, res, next) {
 
     let user = null;
 
-    // 🔥 FIX 1: Handle "marketingExecutive" role (your login uses this)
-   // In your auth middleware (auth.js)
-if (decoded.role === "marketingExecutive") {
-  console.log("👔 Processing marketing executive");
-  user = await MarketingExecutive.findById(decoded.id);
-  
-  if (!user) {
-    console.log("❌ Marketing executive not found in DB");
-    return res.status(401).json({ error: "User not found" });
-  }
-  
-  // ⭐ FIXED: Include meid from the database
-  req.user = {
-    id: decoded.id,
-    role: "marketingExecutive",
-    meid: user.meid, // THIS WAS MISSING!
-    email: user.email,
-    name: user.name,
-    isMarketing: true,
-    isAgent: false,
-    isService: false,
-    isAdmin: true,
-  };
-  console.log("✅ Marketing executive authenticated:", {
-    id: req.user.id,
-    meid: req.user.meid,
-    email: req.user.email
-  });
-}
-// 🔥 FIX 2: Also check for "marketing" for backward compatibility
-else if (decoded.role === "marketing") {
-  console.log("👔 Processing marketing (legacy)");
-  user = await MarketingExecutive.findById(decoded.id);
-  
-  if (!user) {
-    return res.status(401).json({ error: "User not found" });
-  }
-  
-  req.user = {
-    id: decoded.id,
-    role: "marketing",
-    meid: user.meid, // THIS WAS MISSING!
-    email: user.email,
-    name: user.name,
-    isMarketing: true,
-    isAgent: false,
-    isService: false,
-    isAdmin: true,
-  };
-}
+    // 🔥 FIX 1: Handle "marketingExecutive" role
+    if (decoded.role === "marketingExecutive") {
+      console.log("👔 Processing marketing executive");
+      user = await MarketingExecutive.findById(decoded.id);
+      
+      if (!user) {
+        console.log("❌ Marketing executive not found in DB");
+        return res.status(401).json({ error: "User not found" });
+      }
+      
+      // ⭐ FIXED: Include meid from the database
+      req.user = {
+        id: decoded.id,
+        role: "marketingExecutive",
+        meid: user.meid,
+        email: user.email,
+        name: user.name,
+        isMarketing: true,
+        isAgent: false,
+        isService: false,
+        isAdmin: true,
+      };
+      console.log("✅ Marketing executive authenticated:", {
+        id: req.user.id,
+        meid: req.user.meid,
+        email: req.user.email
+      });
+    }
+    // 🔥 FIX 2: Also check for "marketing" for backward compatibility
+    else if (decoded.role === "marketing") {
+      console.log("👔 Processing marketing (legacy)");
+      user = await MarketingExecutive.findById(decoded.id);
+      
+      if (!user) {
+        return res.status(401).json({ error: "User not found" });
+      }
+      
+      req.user = {
+        id: decoded.id,
+        role: "marketing",
+        meid: user.meid,
+        email: user.email,
+        name: user.name,
+        isMarketing: true,
+        isAgent: false,
+        isService: false,
+        isAdmin: true,
+      };
+    }
     else if (decoded.role === "agent") {
       user = await Agent.findById(decoded.id).select("subscription");
       req.user = {
@@ -199,28 +199,47 @@ else if (decoded.role === "marketing") {
         subscription: user?.subscription,
       };
     }
-    // ✅ ADD THIS: Handle admin role
+    // ✅ CRITICAL FIX: Handle admin role with valid ObjectId
     else if (decoded.role === "admin") {
       console.log("👑 Processing admin user");
       
-      // If you have an Admin model, you can fetch it here:
-      // user = await Admin.findById(decoded.id);
-      // if (!user) {
-      //   return res.status(401).json({ error: "Admin not found" });
-      // }
+      // ⭐ FIX: Create a consistent ObjectId for admin users
+      let adminId;
+      let adminObjectId;
       
-      // For now, just validate the token has admin role
+      if (decoded.id === 'admin' || decoded.id === 'admin-user' || decoded.id === '000000000000000000000001') {
+        // Use a consistent ObjectId for admin
+        adminId = '000000000000000000000001'; // 24-character hex string
+        adminObjectId = new mongoose.Types.ObjectId(adminId);
+      } else if (mongoose.Types.ObjectId.isValid(decoded.id)) {
+        // If it's already a valid ObjectId
+        adminId = decoded.id;
+        adminObjectId = new mongoose.Types.ObjectId(adminId);
+      } else {
+        // Generate a new ObjectId from string hash
+        const crypto = require("crypto");
+        const hash = crypto.createHash('md5').update(decoded.id).digest('hex').slice(0, 24);
+        adminId = hash.padStart(24, '0');
+        adminObjectId = new mongoose.Types.ObjectId(adminId);
+      }
+      
       req.user = {
-        id: decoded.id || 'admin-user',
+        id: adminObjectId, // ⭐ Use ObjectId, not string
         role: "admin",
+        originalId: decoded.id, // Keep original for reference
         isAdmin: true,
-        isAgent: false,
+        isAgent: true,
         isService: false,
         isMarketing: false,
-        email: decoded.email,
+        email: decoded.email || "admin@gmail.com",
         name: decoded.name || "Administrator"
       };
-      console.log("✅ Admin authenticated:", req.user.id);
+      
+      console.log("✅ Admin authenticated:", {
+        objectId: req.user.id,
+        originalId: req.user.originalId,
+        email: req.user.email
+      });
     }
     else {
       console.log("❌ Invalid token role:", decoded.role);

@@ -164,8 +164,34 @@ router.post(
   ]),
   async (req, res) => {
     try {
-      // Check if user can post properties
-      const canPost = await canUserPostProperties(req.user);
+      console.log("🔍 User posting property:", {
+        id: req.user.id,
+        role: req.user.role,
+        isAdmin: req.user.isAdmin,
+        isAgent: req.user.isAgent,
+        isService: req.user.isService
+      });
+
+      // ⭐ UPDATED: Allow admin to post properties
+      if (!req.user.isAgent && !req.user.isService) {
+        return res.status(403).json({
+          error: "Only agents or service providers can post properties",
+          userType: req.user.role
+        });
+      }
+
+      // Check if user can post properties (subscription check)
+      // ⭐ For admin, bypass subscription check or handle differently
+      let canPost;
+      
+      if (req.user.isAdmin) {
+        // Admin can always post (or check special admin subscription)
+        canPost = { allowed: true, reason: "Admin user" };
+      } else {
+        // Regular users need subscription check
+        canPost = await canUserPostProperties(req.user);
+      }
+      
       if (!canPost.allowed) {
         return res.status(403).json({
           error: canPost.reason,
@@ -205,6 +231,23 @@ router.post(
         } catch {}
       }
 
+      // ⭐ FIX: Handle admin users
+      let ownerId = req.user.id;
+      let ownerType = "Agent"; // Default
+      
+      if (req.user.isAdmin) {
+        ownerType = "Admin";
+        console.log("👑 Admin posting property as:", {
+          ownerId: ownerId,
+          ownerType: ownerType,
+          name: req.user.name
+        });
+      } else if (req.user.isAgent) {
+        ownerType = "Agent";
+      } else if (req.user.isService) {
+        ownerType = "ServiceProvider";
+      }
+
       // Create property
       const property = new Property({
         title: req.body.title,
@@ -221,13 +264,18 @@ router.post(
         videoUrl,
         location,
         active: true,
-        owner: req.user.id,
-        agent: req.user.isAgent ? req.user.id : null,
-        subscriptionValid: true, // Flag to indicate subscription was valid at time of posting
+        owner: ownerId,
+        ownerType: ownerType, // ⭐ Include owner type
+        agent: req.user.isAgent || req.user.isAdmin ? req.user.id : null,
+        createdBy: req.user.originalId || req.user.id, // Track who created it
+        createdByRole: req.user.role,
+        subscriptionValid: true,
         postedAt: new Date(),
       });
 
       await property.save();
+      
+      console.log("✅ Property posted successfully by:", req.user.role);
       
       res.json({ 
         success: true,
@@ -240,7 +288,6 @@ router.post(
     }
   }
 );
-
 /* ===========================================================
    3️⃣ GET ALL ACTIVE PROPERTIES (PUBLIC — FILTER EXPIRED AGENTS)
    =========================================================== */
