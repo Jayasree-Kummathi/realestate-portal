@@ -205,14 +205,18 @@ router.post(
         return res.status(400).json({ error: "Title is required" });
       }
 
-      // Process images
-      const images = (req.files?.images || []).map(
-        (f) => `/${IMAGES_DIR}/${f.filename}`
-      );
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
 
-      // Process video
-      const videoUrl =
-        req.files?.video?.[0] && `/${VIDEOS_DIR}/${req.files.video[0].filename}`;
+// ✅ Process images
+const images = (req.files?.images || []).map(
+  (f) => `${baseUrl}/${IMAGES_DIR}/${f.filename}`
+);
+
+// ✅ Process video
+const videoUrl =
+  req.files?.video?.[0]
+    ? `${baseUrl}/${VIDEOS_DIR}/${req.files.video[0].filename}`
+    : null;
 
       // Process location
       let location;
@@ -410,11 +414,17 @@ router.put(
   ]),
   async (req, res) => {
     try {
-      // Find property
+      /* =====================================================
+         🔍 Find property
+      ===================================================== */
       const property = await Property.findById(req.params.id);
-      if (!property) return res.status(404).json({ error: "Property not found" });
+      if (!property) {
+        return res.status(404).json({ error: "Property not found" });
+      }
 
-      // Check ownership
+      /* =====================================================
+         🔐 Ownership check
+      ===================================================== */
       const isOwner = property.owner?.toString() === req.user.id;
       const isAgent = property.agent?.toString() === req.user.id;
 
@@ -422,39 +432,59 @@ router.put(
         return res.status(403).json({ error: "Unauthorized" });
       }
 
-      // Check subscription for non-admin agents
+      /* =====================================================
+         📅 Subscription check (agents only)
+      ===================================================== */
       if (!req.user.isAdmin && req.user.isAgent) {
         const canPost = await canUserPostProperties(req.user);
         if (!canPost.allowed) {
           return res.status(403).json({
             error: canPost.reason,
-            renewRequired: canPost.renewRequired || false
+            renewRequired: canPost.renewRequired || false,
           });
         }
       }
 
-      // Update basic fields
+      /* =====================================================
+         🌐 Base URL (CRITICAL FIX)
+      ===================================================== */
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
+
+      /* =====================================================
+         ✏️ Update basic fields
+      ===================================================== */
       const fields = [
-        "title", "description", "listingType", "areaName", "city",
-        "price", "address", "nearestPlace", "nearbyHighway", "projectName"
+        "title",
+        "description",
+        "listingType",
+        "areaName",
+        "city",
+        "price",
+        "address",
+        "nearestPlace",
+        "nearbyHighway",
+        "projectName",
       ];
 
       fields.forEach((field) => {
         if (req.body[field] !== undefined) {
-          if (field === "price") {
-            property[field] = Number(req.body[field]);
-          } else {
-            property[field] = req.body[field];
-          }
+          property[field] =
+            field === "price"
+              ? Number(req.body[field])
+              : req.body[field];
         }
       });
 
-      // Update location
+      /* =====================================================
+         📍 Update location
+      ===================================================== */
       if (req.body.location) {
         try {
-          const loc = typeof req.body.location === "string" 
-            ? JSON.parse(req.body.location) 
-            : req.body.location;
+          const loc =
+            typeof req.body.location === "string"
+              ? JSON.parse(req.body.location)
+              : req.body.location;
+
           if (loc?.lng && loc?.lat) {
             property.location = {
               type: "Point",
@@ -466,54 +496,69 @@ router.put(
         }
       }
 
-      // Handle image removal
+      /* =====================================================
+         🗑 Remove selected images
+      ===================================================== */
       if (req.body.removeImages) {
         try {
           const removeIndices = Array.isArray(req.body.removeImages)
             ? req.body.removeImages.map(Number)
             : JSON.parse(req.body.removeImages);
-          
-          // Delete files and remove from array
+
           removeIndices.forEach((index) => {
             if (property.images[index]) {
               safeDelete(property.images[index]);
             }
           });
-          
+
           property.images = property.images.filter(
             (_, index) => !removeIndices.includes(index)
           );
-        } catch (e) {
-          console.warn("Error parsing removeImages:", e.message);
+        } catch (err) {
+          console.warn("Error parsing removeImages:", err.message);
         }
       }
 
-      // Add new images
+      /* =====================================================
+         ➕ Add new images (FIXED)
+      ===================================================== */
       if (req.files?.images?.length) {
         req.files.images.forEach((file) => {
-          property.images.push(`/${IMAGES_DIR}/${file.filename}`);
+          property.images.push(
+            `${baseUrl}/${IMAGES_DIR}/${file.filename}`
+          );
         });
       }
 
-      // Update video
+      /* =====================================================
+         🎥 Update video (FIXED)
+      ===================================================== */
       if (req.files?.video?.length) {
-        // Delete old video
-        if (property.videoUrl) safeDelete(property.videoUrl);
-        property.videoUrl = `/${VIDEOS_DIR}/${req.files.video[0].filename}`;
+        if (property.videoUrl) {
+          safeDelete(property.videoUrl);
+        }
+
+        property.videoUrl =
+          `${baseUrl}/${VIDEOS_DIR}/${req.files.video[0].filename}`;
       }
 
-      // Update subscription validity flag
+      /* =====================================================
+         ✅ Update subscription validity flag
+      ===================================================== */
       if (req.user.isAgent) {
         const agent = await Agent.findById(req.user.id).select("subscription");
         property.subscriptionValid = isSubscriptionValid(agent?.subscription);
       }
 
+      /* =====================================================
+         💾 Save & respond
+      ===================================================== */
       await property.save();
 
-      res.json({ 
+      res.json({
         success: true,
-        message: "Property updated successfully", 
-        property 
+        message: "Property updated successfully",
+        property,
       });
     } catch (err) {
       console.error("Update failed:", err);

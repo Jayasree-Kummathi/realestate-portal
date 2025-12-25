@@ -76,9 +76,12 @@ router.post("/register", upload.single("voterIdFile"), async (req, res) => {
     if (await Agent.findOne({ email }))
       return res.status(400).json({ error: "Agent already exists" });
 
-    const voterIdFile = req.file
-      ? `/uploads/voterIds/${req.file.filename}`
-      : null;
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+
+const voterIdFile = req.file
+  ? `${baseUrl}/uploads/voterIds/${req.file.filename}`
+  : null;
+
 
     const newAgent = new Agent({
       agentId: generateAgentId(),

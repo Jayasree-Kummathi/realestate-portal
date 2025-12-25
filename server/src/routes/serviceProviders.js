@@ -134,13 +134,24 @@ const uploadImages = multer({ storage: imgStorage });
 /* =============================================================================
    🧹 Helper — Delete old images
 ============================================================================= */
-function safeDelete(relPath) {
+function safeDelete(fileUrl) {
   try {
-    if (!relPath) return;
-    const abs = path.join(process.cwd(), relPath.replace(/^\//, ""));
-    if (fs.existsSync(abs)) fs.unlinkSync(abs);
-  } catch {}
+    if (!fileUrl) return;
+
+    // Extract path after domain
+    const url = new URL(fileUrl);
+    const relativePath = url.pathname.replace(/^\//, "");
+
+    const abs = path.join(process.cwd(), relativePath);
+
+    if (fs.existsSync(abs)) {
+      fs.unlinkSync(abs);
+    }
+  } catch (err) {
+    console.warn("safeDelete skipped:", err.message);
+  }
 }
+
 
 /* =============================================================================
    ⭐ 1) GET ALL SERVICES (PUBLIC — FILTER EXPIRED PROVIDERS)
@@ -190,44 +201,39 @@ router.post(
   ]),
   async (req, res) => {
     try {
-     const {
-  name, email, phone, password,
-  serviceCategory,
-  selectedServices,
-  referralAgentId,
-
-  referralMarketingExecutiveName,
-  referralMarketingExecutiveId
-} = req.body;
-
+      const {
+        name, email, phone, password,
+        serviceCategory,
+        selectedServices,
+        referralAgentId,
+        referralMarketingExecutiveName,
+        referralMarketingExecutiveId
+      } = req.body;
 
       if (!req.files?.aadhar || !req.files?.voter)
-        return res
-          .status(400)
-          .json({ error: "Aadhar and Voter ID are required" });
+        return res.status(400).json({ error: "Aadhar and Voter ID are required" });
 
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
       const tempId = crypto.randomBytes(12).toString("hex");
 
       const data = {
         tempId,
-       provider: {
-  name,
-  email,
-  phone,
-  password,
-  serviceCategory,
-  selectedServices: selectedServices ? JSON.parse(selectedServices) : [],
-  referralAgentId: referralAgentId || null,
-
-  // ⭐ NEW FIELDS
-  referralMarketingExecutiveName,
-  referralMarketingExecutiveId,
+        provider: {
+          name,
+          email,
+          phone,
+          password,
+          serviceCategory,
+          selectedServices: selectedServices ? JSON.parse(selectedServices) : [],
+          referralAgentId: referralAgentId || null,
+          referralMarketingExecutiveName,
+          referralMarketingExecutiveId,
         },
         files: {
-          aadhar: `/${DOCS_DIR}/${req.files.aadhar[0].filename}`,
-          voter: `/${DOCS_DIR}/${req.files.voter[0].filename}`,
+          aadhar: `${baseUrl}/${DOCS_DIR}/${req.files.aadhar[0].filename}`,
+          voter: `${baseUrl}/${DOCS_DIR}/${req.files.voter[0].filename}`,
           pan: req.files.pan
-            ? `/${DOCS_DIR}/${req.files.pan[0].filename}`
+            ? `${baseUrl}/${DOCS_DIR}/${req.files.pan[0].filename}`
             : null,
         },
       };
@@ -512,7 +518,12 @@ router.post("/service", auth, uploadImages.array("images", 10), async (req, res)
       });
     }
 
-    const images = req.files.map((f) => `/${IMG_DIR}/${f.filename}`);
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+
+const images = req.files.map(
+  (f) => `${baseUrl}/${IMG_DIR}/${f.filename}`
+);
+
 
     const service = new Service({
       provider: req.user.id,
