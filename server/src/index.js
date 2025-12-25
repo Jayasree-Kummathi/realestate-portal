@@ -12,19 +12,20 @@ const MONGO_URI =
 
 console.log("👉 Running server from:", __dirname);
 
+// ✅ Health check (recommended)
+app.get("/", (req, res) => {
+  res.send("RealEstate Portal API running 🚀");
+});
+
 async function start() {
   try {
-    await mongoose.connect(MONGO_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-
+    await mongoose.connect(MONGO_URI);
     console.log("✔ MongoDB connected");
 
-    // 🔔 START SUBSCRIPTION CRON (ADD THIS LINE)
+    // 🔔 Start cron jobs
     require("./cron/subscriptionCheck");
 
-    // Create default admin if not exists
+    // 🔐 Ensure admin exists
     await createDefaultAdmin();
 
     app.listen(PORT, () => {
@@ -42,9 +43,7 @@ async function createDefaultAdmin() {
     const password = process.env.ADMIN_PASSWORD;
 
     if (!email || !password) {
-      console.warn(
-        "⚠ ADMIN_EMAIL or ADMIN_PASSWORD not set — skipping default admin creation."
-      );
+      console.warn("⚠ ADMIN_EMAIL or ADMIN_PASSWORD not set");
       return;
     }
 
@@ -56,14 +55,13 @@ async function createDefaultAdmin() {
 
     const hashed = await bcrypt.hash(password, 10);
 
-    const admin = new User({
+    await User.create({
       name: "Portal Admin",
       email,
       password: hashed,
       role: "admin",
     });
 
-    await admin.save();
     console.log("✔ Default admin created:", email);
   } catch (err) {
     console.error("❌ Failed to create default admin:", err);
