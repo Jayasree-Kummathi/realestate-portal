@@ -12,6 +12,7 @@ export default function RenewalSuccess() {
   const [success, setSuccess] = useState(false);
   const [orderId, setOrderId] = useState(queryParams.get('order_id') || "");
   const [userEmail, setUserEmail] = useState("");
+  const [userType, setUserType] = useState(""); // ✅ ADDED: Track user type
 
   useEffect(() => {
     // Get email from localStorage (set during renewal process)
@@ -35,23 +36,23 @@ export default function RenewalSuccess() {
       
       // ✅ FIXED: Better order ID parsing
       let userId = "";
-      let userType = "";
+      let parsedUserType = "";
       
       if (orderId.startsWith('RENEW_AGENT_')) {
         // Format: RENEW_AGENT_USERID_TIMESTAMP
         const parts = orderId.split('_');
         userId = parts[2];
-        userType = 'agent';
+        parsedUserType = 'agent';
       } else if (orderId.startsWith('RENEW_SERVICE_')) {
         // Format: RENEW_SERVICE_USERID_TIMESTAMP
         const parts = orderId.split('_');
         userId = parts[2];
-        userType = 'service-provider'; // ← CRITICAL FIX
+        parsedUserType = 'service-provider';
       } else if (orderId.startsWith('RENEW_SP_')) {
         // Format: RENEW_SP_USERID_TIMESTAMP (alternative)
         const parts = orderId.split('_');
         userId = parts[2];
-        userType = 'service-provider';
+        parsedUserType = 'service-provider';
       } else {
         throw new Error("Invalid order ID format. Could not determine user type.");
       }
@@ -59,12 +60,15 @@ export default function RenewalSuccess() {
       console.log("📦 Verification data:", { 
         orderId, 
         userId, 
-        userType,
+        parsedUserType,
         userEmail 
       });
       
+      // Store user type for redirect
+      setUserType(parsedUserType);
+      
       // ✅ FIXED: Use correct endpoint based on userType
-      const endpoint = userType === 'agent' 
+      const endpoint = parsedUserType === 'agent' 
         ? '/agents/renewal/verify-payment'
         : '/service-provider/renewal/verify-payment';
       
@@ -73,7 +77,7 @@ export default function RenewalSuccess() {
       const response = await api.post(endpoint, {
         orderId: orderId,
         userId: userId,
-        userType: userType
+        userType: parsedUserType
       });
       
       const data = response.data;
@@ -96,9 +100,10 @@ export default function RenewalSuccess() {
         localStorage.removeItem("renewalUserId");
         localStorage.removeItem("renewalUserType");
         
-        // Auto-redirect to login after 5 seconds
+        // ✅ FIXED: Redirect to appropriate login page based on user type
         setTimeout(() => {
-          navigate('/login', {
+          const loginPage = getLoginPage(parsedUserType);
+          navigate(loginPage, {
             state: {
               renewalSuccess: true,
               email: data.user?.email || userEmail,
@@ -133,6 +138,18 @@ export default function RenewalSuccess() {
     }
   };
 
+  // ✅ ADDED: Function to get correct login page based on user type
+  const getLoginPage = (userType) => {
+    switch(userType) {
+      case 'agent':
+        return '/agent-login';
+      case 'service-provider':
+        return '/service-provider-login';
+      default:
+        return '/login'; // fallback
+    }
+  };
+
   const sendConfirmationEmail = async (email, name, subscription) => {
     try {
       const res = await api.post("/send-payment-email", {
@@ -154,8 +171,10 @@ export default function RenewalSuccess() {
     }
   };
 
+  // ✅ UPDATED: Handle login redirect based on user type
   const handleLoginRedirect = () => {
-    navigate('/login', {
+    const loginPage = getLoginPage(userType);
+    navigate(loginPage, {
       state: {
         renewalSuccess: true,
         email: userEmail
@@ -200,11 +219,14 @@ export default function RenewalSuccess() {
             <div style={styles.orderDetails}>
               <h3>Order Details</h3>
               <p><strong>Order ID:</strong> {orderId}</p>
-              <p><strong>Order Type:</strong> {
-                orderId.startsWith('RENEW_SERVICE_') ? 'Service Provider' : 
-                orderId.startsWith('RENEW_AGENT_') ? 'Agent' : 'Unknown'
+              <p><strong>User Type:</strong> {
+                userType === 'agent' ? 'Agent' : 
+                userType === 'service-provider' ? 'Service Provider' : 'Unknown'
               }</p>
               <p><strong>User Email:</strong> {userEmail || "Not available"}</p>
+              <p><strong>Redirecting to:</strong> {
+                success ? (userType === 'agent' ? 'Agent Login' : 'Service Provider Login') : 'N/A'
+              }</p>
               <p><strong>Status:</strong> {loading ? "Verifying..." : success ? "✅ Verified" : "❌ Failed"}</p>
             </div>
           )}
@@ -217,10 +239,10 @@ export default function RenewalSuccess() {
                   onClick={handleLoginRedirect}
                   style={styles.primaryButton}
                 >
-                  Login Now
+                  Go to {userType === 'agent' ? 'Agent' : 'Service Provider'} Login
                 </button>
                 <p style={styles.redirectText}>
-                  Auto-redirecting to login in 5 seconds...
+                  Auto-redirecting in 5 seconds...
                 </p>
               </>
             ) : (

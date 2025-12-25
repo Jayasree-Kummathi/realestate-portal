@@ -24,6 +24,8 @@ const serviceEnquiryRoutes = require("./routes/serviceEnquiry");
 const marketingExecutiveRoutes = require("./routes/marketingExecutive");
 const companyBanners = require("./routes/companyBanners");
 const serviceProviderRenewalRoutes = require("./routes/serviceProviderRenewal");
+const servicesRoutes = require("./routes/services");
+
 
 const app = express();
 
@@ -64,6 +66,7 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use("/api/auth", authRoutes);
 app.use("/api/payments", paymentRoutes);          // renew + verify
 app.use("/api/company-banners", companyBanners);
+app.use("/api/services", servicesRoutes);
 
 /* 🔓 PUBLIC PROPERTY VIEW (IMPORTANT FIX) */
 app.use("/api/properties", propertyRoutes);       // 👈 PUBLIC GET routes only

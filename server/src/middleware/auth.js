@@ -3,49 +3,118 @@ const Agent = require("../models/Agent");
 const ServiceProvider = require("../models/ServiceProvider");
 const MarketingExecutive = require("../models/MarketingExecutive");
 
+// Helper function to check dynamic public routes WITH METHOD CHECK
+function checkDynamicPublicRoutes(url, method) {
+  const dynamicPublicPatterns = [
+    // ✅ ADD RESET-PASSWORD ROUTES
+    { pattern: /^\/api\/agents\/reset-password\/[a-zA-Z0-9]+$/, methods: ['POST'] },
+    { pattern: /^\/api\/service-provider\/reset-password\/[a-zA-Z0-9]+$/, methods: ['POST'] },
+    
+    // These should be public for GET only
+    { pattern: /^\/api\/service-provider\/[a-fA-F0-9]{24}$/, methods: ['GET'] }, // /service-provider/:id
+    { pattern: /^\/api\/service-provider\/[a-fA-F0-9]{24}\/services$/, methods: ['GET'] }, // /service-provider/:id/services
+    { pattern: /^\/api\/service-provider\/service\/[a-fA-F0-9]{24}$/, methods: ['GET'] }, // /service-provider/service/:id
+    
+    // These can be public for all methods
+    { pattern: /^\/api\/service-provider\/by-email\?/, methods: ['GET', 'POST'] },
+    { pattern: /^\/api\/service-provider\/subscription-status\/[a-fA-F0-9]{24}$/, methods: ['GET'] },
+    { pattern: /^\/api\/service-provider\/can-post-services\/[a-fA-F0-9]{24}$/, methods: ['GET'] },
+    { pattern: /^\/api\/service-provider\/services-count\/[a-fA-F0-9]{24}$/, methods: ['GET'] },
+  ];
+
+  return dynamicPublicPatterns.some(item => 
+    item.pattern.test(url) && item.methods.includes(method)
+  );
+}
+
 async function auth(req, res, next) {
   try {
+    console.log("🔐 AUTH MIDDLEWARE START =================");
+    console.log("URL:", req.originalUrl);
+    console.log("Method:", req.method);
+    
     let token = null;
 
     const authHeader = req.headers.authorization;
     if (authHeader?.startsWith("Bearer ")) {
       token = authHeader.split(" ")[1];
+      console.log("Token found in header");
+    } else {
+      console.log("No Bearer token in header");
     }
 
+    // ✅ UPDATED: More comprehensive public routes list
     const publicRoutes = [
+      // Agent public routes
       "/agents/login",
       "/agents/register",
       "/agents/forgot-password",
       "/agents/reset-password",
-
       "/agents/renewal/verify-email",
       "/agents/renewal/create-order",
       "/agents/renewal/verify-payment",
 
+      // Service Provider public routes
       "/service-provider/login",
       "/service-provider/register",
       "/service-provider/forgot-password",
       "/service-provider/reset-password",
-
       "/service-provider/renewal/verify-email",
       "/service-provider/renewal/create-order",
       "/service-provider/renewal/verify-payment",
 
+      // Marketing Executive public routes
       "/marketing-executive/login",
-      "/admin/login", // Add admin login to public routes if you have one
+
+      // Admin public routes
+      "/admin/login",
+
+      // ⭐ CRITICAL: Service Provider public browsing routes (GET only)
+      // These are handled in checkDynamicPublicRoutes with method restriction
     ];
 
-    const isPublic = publicRoutes.some(
-      (route) => req.originalUrl.startsWith(`/api${route}`)
-    );
-
-    if (isPublic) {
-      console.log("🔓 Public route:", req.originalUrl);
+    // ⭐ CRITICAL FIX: Check for reset-password routes with tokens FIRST
+    // This must come BEFORE the exact match check
+    if (req.method === 'POST' && (
+        req.originalUrl.startsWith('/api/agents/reset-password/') ||
+        req.originalUrl.startsWith('/api/service-provider/reset-password/')
+    )) {
+      console.log("🔓 Public reset-password route (with token):", req.originalUrl);
       return next();
     }
 
+    // First check exact matches in publicRoutes
+    const exactPublicMatch = publicRoutes.some(
+      (route) => req.originalUrl === `/api${route}`
+    );
+
+    if (exactPublicMatch) {
+      console.log("🔓 Public route (exact match):", req.originalUrl);
+      return next();
+    }
+
+    // ⭐ IMPORTANT: Check for service-provider root and all-providers (GET only)
+    if (req.method === 'GET') {
+      if (req.originalUrl === '/api/service-provider' || 
+          req.originalUrl === '/api/service-provider/' ||
+          req.originalUrl === '/api/service-provider/all-providers') {
+        console.log("🔓 Service provider public browsing route:", req.originalUrl);
+        return next();
+      }
+    }
+
+    // Check for dynamic public routes WITH METHOD CHECK
+    const isDynamicPublicRoute = checkDynamicPublicRoutes(req.originalUrl, req.method);
+    
+    if (isDynamicPublicRoute) {
+      console.log("🔓 Public route (dynamic, method:", req.method, "):", req.originalUrl);
+      return next();
+    }
+
+    // If no token for protected routes
     if (!token) {
-      console.log("❌ No token for:", req.originalUrl);
+      console.log("❌ No token for protected route:", req.originalUrl);
+      console.log("Method:", req.method);
       return res.status(401).json({ error: "No token provided" });
     }
 
@@ -53,42 +122,60 @@ async function auth(req, res, next) {
     console.log("🔐 Verifying token for:", req.originalUrl);
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     console.log("✅ Decoded token role:", decoded.role);
+    console.log("✅ Decoded token ID:", decoded.id);
 
     let user = null;
 
     // 🔥 FIX 1: Handle "marketingExecutive" role (your login uses this)
-    if (decoded.role === "marketingExecutive") {
-      console.log("👔 Processing marketing executive");
-      user = await MarketingExecutive.findById(decoded.id);
-      
-      if (!user) {
-        console.log("❌ Marketing executive not found in DB");
-        return res.status(401).json({ error: "User not found" });
-      }
-      
-      req.user = {
-        id: decoded.id,
-        role: "marketingExecutive",  // Keep consistent
-        isMarketing: true,
-        isAgent: false,
-        isService: false,
-        isAdmin: true,
-      };
-      console.log("✅ Marketing executive authenticated:", req.user.id);
-    }
-    // 🔥 FIX 2: Also check for "marketing" for backward compatibility
-    else if (decoded.role === "marketing") {
-      console.log("👔 Processing marketing (legacy)");
-      user = await MarketingExecutive.findById(decoded.id);
-      req.user = {
-        id: decoded.id,
-        role: "marketing",
-        isMarketing: true,
-        isAgent: false,
-        isService: false,
-        isAdmin: true,
-      };
-    }
+   // In your auth middleware (auth.js)
+if (decoded.role === "marketingExecutive") {
+  console.log("👔 Processing marketing executive");
+  user = await MarketingExecutive.findById(decoded.id);
+  
+  if (!user) {
+    console.log("❌ Marketing executive not found in DB");
+    return res.status(401).json({ error: "User not found" });
+  }
+  
+  // ⭐ FIXED: Include meid from the database
+  req.user = {
+    id: decoded.id,
+    role: "marketingExecutive",
+    meid: user.meid, // THIS WAS MISSING!
+    email: user.email,
+    name: user.name,
+    isMarketing: true,
+    isAgent: false,
+    isService: false,
+    isAdmin: true,
+  };
+  console.log("✅ Marketing executive authenticated:", {
+    id: req.user.id,
+    meid: req.user.meid,
+    email: req.user.email
+  });
+}
+// 🔥 FIX 2: Also check for "marketing" for backward compatibility
+else if (decoded.role === "marketing") {
+  console.log("👔 Processing marketing (legacy)");
+  user = await MarketingExecutive.findById(decoded.id);
+  
+  if (!user) {
+    return res.status(401).json({ error: "User not found" });
+  }
+  
+  req.user = {
+    id: decoded.id,
+    role: "marketing",
+    meid: user.meid, // THIS WAS MISSING!
+    email: user.email,
+    name: user.name,
+    isMarketing: true,
+    isAgent: false,
+    isService: false,
+    isAdmin: true,
+  };
+}
     else if (decoded.role === "agent") {
       user = await Agent.findById(decoded.id).select("subscription");
       req.user = {
@@ -141,6 +228,7 @@ async function auth(req, res, next) {
     }
 
     console.log("✅ Authenticated:", req.user.role, req.user.id);
+    console.log("🔐 AUTH MIDDLEWARE END =================\n");
     return next();
 
   } catch (err) {

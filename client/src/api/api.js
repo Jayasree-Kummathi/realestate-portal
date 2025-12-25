@@ -21,8 +21,8 @@ api.interceptors.request.use((config) => {
     config.url.includes("reset-password") ||
     config.url.includes("login") ||
     // ✅ CRITICAL ADDITION: Skip auth for ALL renewal endpoints
-    config.url.includes("renewal/") ||
-    config.url.includes("/renewal/");
+    config.url.includes("/renew") ||
+    config.url.includes("/renew");
 
   if (!skipAuth) {
     // Try all possible token keys in priority order

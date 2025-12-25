@@ -53,7 +53,7 @@ export default function ServiceProviderDashboard() {
   };
 
   const handleViewDetails = () => {
-    navigate("/service-provider-details");
+    navigate("/service-provider/:id");
   };
 
   const handleRenewSubscription = () => {
@@ -260,7 +260,7 @@ export default function ServiceProviderDashboard() {
         <h3 style={styles.quickActionsTitle}>Quick Actions</h3>
         <div style={styles.actionButtons}>
           <button 
-            onClick={() => navigate("/service/new")}
+            onClick={() => navigate("/service-upload")}
             style={styles.actionButton}
           >
             ➕ Add New Service

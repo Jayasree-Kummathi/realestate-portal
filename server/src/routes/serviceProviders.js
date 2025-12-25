@@ -145,23 +145,18 @@ function safeDelete(relPath) {
 /* =============================================================================
    ⭐ 1) GET ALL SERVICES (PUBLIC — FILTER EXPIRED PROVIDERS)
 ============================================================================= */
+// Public services listing
 router.get("/", async (req, res) => {
-  try {
-    const services = await Service.find()
-      .populate("provider", "name email phone serviceCategory subscription");
+  const services = await Service.find()
+    .populate("provider", "name email phone serviceCategory subscription");
 
-    // Filter out services from providers with expired subscriptions
-    const visible = services.filter(s => {
-      if (!s.provider) return false;
-      return isSubscriptionValid(s.provider.subscription);
-    });
+  const visible = services.filter(
+    s => s.provider && isSubscriptionValid(s.provider.subscription)
+  );
 
-    res.json(visible);
-  } catch (err) {
-    console.error("SERVICES LIST ERROR:", err);
-    res.status(500).json({ error: "Failed to load services" });
-  }
+  res.json(visible);
 });
+
 
 /* =============================================================================
    ⭐ 2) ALL PROVIDERS (PUBLIC — FILTER EXPIRED)
@@ -548,19 +543,34 @@ router.post("/service", auth, uploadImages.array("images", 10), async (req, res)
 });
 
 /* =============================================================================
-   ⭐ 8) UPDATE SERVICE (WITH SUBSCRIPTION CHECK)
+   ⭐ 8) UPDATE SERVICE (WITH SUBSCRIPTION CHECK) - FIXED VERSION
 ============================================================================= */
 router.put("/service/:id", auth, uploadImages.array("images", 10), async (req, res) => {
   try {
     console.log("🔄 UPDATE SERVICE REQUEST =========");
     console.log("Service ID:", req.params.id);
+    
+    // ✅ FIX: Check if req.user exists
+    if (!req.user) {
+      console.log("❌ ERROR: req.user is undefined!");
+      return res.status(401).json({ 
+        error: "Authentication required",
+        details: "User not authenticated"
+      });
+    }
+    
     console.log("User ID:", req.user.id);
     console.log("User role:", req.user.role);
+    console.log("Full req.user:", req.user);
 
-    // Check user role
-    if (req.user.role !== "service") {
-      console.log("❌ User not a service provider");
-      return res.status(403).json({ error: "Unauthorized" });
+    // Check user role - accept both "service" and "service-provider"
+    const validRoles = ["service", "service-provider"];
+    if (!validRoles.includes(req.user.role)) {
+      console.log("❌ User not a service provider, role is:", req.user.role);
+      return res.status(403).json({ 
+        error: "Unauthorized",
+        details: `Invalid role: ${req.user.role}`
+      });
     }
 
     // ✅ FIX: Load fresh subscription data from database
@@ -658,10 +668,25 @@ router.put("/service/:id", auth, uploadImages.array("images", 10), async (req, r
     console.error("❌ SERVICE UPDATE ERROR:", err);
     console.error("Error details:", err.message);
     console.error("Error stack:", err.stack);
-    res.status(500).json({ error: "Service update failed" });
+    console.error("Request params:", req.params);
+    console.error("Request body keys:", Object.keys(req.body));
+    console.error("Request files:", req.files ? req.files.length : 0);
+    console.error("req.user exists?", !!req.user);
+    
+    // Specific error for undefined req.user
+    if (err.message.includes("Cannot read properties of undefined")) {
+      return res.status(401).json({ 
+        error: "Authentication failed",
+        details: "User not properly authenticated. Please log in again."
+      });
+    }
+    
+    res.status(500).json({ 
+      error: "Service update failed",
+      details: err.message 
+    });
   }
 });
-
 /* =============================================================================
    ⭐ 9) DELETE SERVICE (WITH SUBSCRIPTION CHECK)
 ============================================================================= */

@@ -308,9 +308,9 @@ export default function RenewalPaymentSuccess() {
           </div>
           
           <div style={styles.actionButtons}>
-            <button onClick={() => navigate("/dashboard")} style={styles.primaryButton}>
+            {/* <button onClick={() => navigate("/dashboard")} style={styles.primaryButton}>
               Go to Dashboard
-            </button>
+            </button> */}
             <button onClick={() => navigate("/")} style={styles.secondaryButton}>
               Back to Home
             </button>
@@ -347,7 +347,7 @@ export default function RenewalPaymentSuccess() {
       <div style={styles.card}>
         <h2>Payment Status Unknown</h2>
         <p>We couldn't determine your payment status. Please check your email for confirmation or contact support.</p>
-        <button onClick={() => navigate("/dashboard")} style={styles.button}>
+        <button onClick={() => navigate("/")} style={styles.button}>
           Go to Dashboard
         </button>
       </div>

@@ -23,8 +23,9 @@ export default function ServiceHome() {
     loadServices();
   }, []);
 
-  async function loadServices() {
-    const res = await api.get("/service-provider/");
+ async function loadServices() {
+  try {
+    const res = await api.get("/services"); // ✅ PUBLIC API
     const list = res.data || [];
     setServices(list);
 
@@ -32,7 +33,11 @@ export default function ServiceHome() {
       ...new Set(list.map((s) => s.city?.trim()).filter(Boolean)),
     ];
     setCities(uniqueCities);
+  } catch (err) {
+    console.error("Failed to load services", err);
   }
+}
+
 
   /* ==================== LOAD AREAS ==================== */
   useEffect(() => {

@@ -121,14 +121,28 @@ router.get("/admin/referrals", auth, async (req, res) => {
 /* ===========================================================
    GET AGENTS REFERRED BY THIS ME
 =========================================================== */
+/* ===========================================================
+   GET AGENTS REFERRED BY THIS ME (FIXED)
+=========================================================== */
 router.get("/my-referred-agents", auth, async (req, res) => {
   try {
+    console.log("🔍 Fetching agents for ME ID:", req.user.meid);
+    
+    // ⭐ FIXED: Only find agents where:
+    // 1. referralMarketingExecutiveId exists AND is not empty
+    // 2. referralMarketingExecutiveId matches the logged-in ME's ID
     const agents = await Agent.find({
-      referralMarketingExecutiveId: req.user.meid, // ⭐ FIXED FIELD NAME
+      referralMarketingExecutiveId: { 
+        $exists: true, 
+        $ne: "", // Exclude empty strings
+        $eq: req.user.meid 
+      }
     }).select(
-      "agentId name email phone profession referralExecutiveName referralExecutiveId createdAt"
+      "agentId name email phone profession referralMarketingExecutiveName referralMarketingExecutiveId createdAt"
     );
 
+    console.log("🔍 Found referred agents:", agents.length);
+    
     res.json({
       success: true,
       count: agents.length,

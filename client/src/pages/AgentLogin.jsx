@@ -28,107 +28,114 @@ export default function AgentLogin() {
     return true;
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setMsg("");
-    setLoading(true);
+const handleSubmit = async (e) => {
+  e.preventDefault();
+  if (loading) return;
+  setMsg("");
+  setLoading(true);
 
-    try {
-      // ✅ CLEAR ALL OLD TOKENS
-      localStorage.clear(); // Clear everything
-      delete api.defaults.headers.Authorization;
+  try {
+    // Clear old session
+    localStorage.clear();
+    delete api.defaults.headers.Authorization;
 
-      console.log("🔄 Sending login request for:", email);
-      const res = await api.post("/auth/agent-login", {
-        email: email.toLowerCase().trim(),
-        password: password.trim(),
-      });
+    console.log("🔄 Sending login request for:", email);
 
-      console.log("✅ Login response:", res.data);
-      console.log("🔍 Response structure:", {
-        hasToken: !!res.data.token,
-        hasUser: !!res.data.user,
+    const res = await api.post("/auth/agent-login", {
+      email: email.toLowerCase().trim(),
+      password: password.trim(),
+    });
+
+    console.log("✅ Login response:", res.data);
+    console.log("🔍 Response keys:", Object.keys(res.data));
+
+    // ⭐ FIX: Check for BOTH "agent" AND "user" fields
+    const token = res.data.token;
+    const agentData = res.data.agent || res.data.user; // Try both!
+    
+    if (!token || !agentData) {
+      console.error("❌ Missing token or user data:", {
+        hasToken: !!token,
         hasAgent: !!res.data.agent,
-        keys: Object.keys(res.data)
+        hasUser: !!res.data.user,
+        allKeys: Object.keys(res.data)
       });
-
-      // ✅ FIX: Backend returns "user" not "agent"
-      if (!res.data.token || !res.data.user) {
-        console.error("❌ Missing token or user data in response");
-        setMsg("❌ Invalid server response format");
-        setLoading(false);
-        return;
-      }
-
-      const token = res.data.token;
-      const userData = res.data.user; // This is your agent data
-      
-      // Save tokens
-      localStorage.setItem("token", token);
-      localStorage.setItem("agentToken", token);
-      api.defaults.headers.Authorization = `Bearer ${token}`;
-
-      // ✅ SAVE USER INFO - use "user" from response
-      localStorage.setItem(
-        "user",
-        JSON.stringify({
-          ...userData,
-          isAgent: true,
-          isAdmin: false,
-          isService: false,
-        })
-      );
-
-      console.log("🔑 Saved user data:", {
-        id: userData._id,
-        name: userData.name,
-        email: userData.email,
-        subscription: userData.subscription
-      });
-
-      // ✅ CHECK SUBSCRIPTION VALIDITY
-      const subscription = userData?.subscription;
-      console.log("📅 Subscription data:", subscription);
-      
-      const hasValidSubscription = checkSubscriptionValidity(subscription);
-      console.log("✅ Subscription valid?", hasValidSubscription);
-      
+      setMsg("❌ Invalid server response format");
       setLoading(false);
-      
-      if (hasValidSubscription) {
-        // ✅ Valid subscription - go to dashboard
-        console.log("➡️ Redirecting to agent dashboard");
-        nav("/agent-dashboard");
-      } else {
-        // ❌ Invalid subscription - go to renewal page
-        console.log("➡️ Redirecting to subscription renewal");
-        nav(`/upgrade-subscription?email=${encodeURIComponent(email)}&type=agent&id=${userData._id}`, { 
-          state: { 
-            userType: "agent",
-            subscription: subscription,
-            redirectTo: "/agent-dashboard"
-          }
-        });
-      }
-
-    } catch (err) {
-      console.error("❌ Login error details:", {
-        message: err.message,
-        response: err.response?.data,
-        status: err.response?.status,
-      });
-      
-      if (err.response?.status === 400 || err.response?.status === 401) {
-        setMsg("❌ " + (err.response?.data?.error || "Invalid email or password"));
-      } else if (!err.response) {
-        setMsg("❌ Network error. Please check your connection.");
-      } else {
-        setMsg("❌ " + (err.response?.data?.error || "Login failed"));
-      }
-      
-      setLoading(false);
+      return;
     }
-  };
+
+    // ✅ SAVE TOKEN
+    localStorage.setItem("token", token);
+    localStorage.setItem("agentToken", token);
+    api.defaults.headers.Authorization = `Bearer ${token}`;
+
+    // ✅ SAVE USER DATA
+    localStorage.setItem(
+      "user",
+      JSON.stringify({
+        ...agentData,
+        isAgent: true,
+        isAdmin: false,
+        isService: false,
+      })
+    );
+
+    console.log("🔑 Agent logged in:", {
+      id: agentData._id,
+      name: agentData.name,
+      email: agentData.email,
+      subscription: agentData.subscription,
+    });
+
+    setMsg(""); // Clear errors
+    setLoading(false);
+
+    // ✅ Check subscription (optional)
+    if (agentData.subscription?.active !== true) {
+      console.log("⚠️ Subscription inactive, redirecting to renewal");
+      nav("/renew", {
+        state: {
+          userId: agentData._id,
+          email: agentData.email,
+          name: agentData.name,
+          userType: "agent",
+          subscription: agentData.subscription
+        }
+      });
+      return;
+    }
+    
+    // All good - go to dashboard
+    nav("/agent-dashboard");
+
+  } catch (err) {
+    setLoading(false);
+    
+    console.error("❌ Login error:", {
+      status: err.response?.status,
+      data: err.response?.data,
+      message: err.message
+    });
+
+    // Handle subscription expired
+    if (err.response?.status === 403 && err.response?.data?.error === "SUBSCRIPTION_EXPIRED") {
+      nav("/renew", {
+        state: err.response.data.data
+      });
+      return;
+    }
+
+    // Handle invalid credentials
+    if (err.response?.status === 400 || err.response?.status === 401) {
+      setMsg("❌ " + (err.response?.data?.error || "Invalid email or password"));
+      return;
+    }
+
+    // Handle other errors
+    setMsg("❌ Login failed. Please try again.");
+  }
+};
 
   return (
     <div style={styles.page}>

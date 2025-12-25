@@ -38,7 +38,7 @@ const handleLogin = async (e) => {
   setLoading(true);
 
   try {
-    // 🔥 clear old data
+    // 🔥 clear old auth state
     localStorage.clear();
     delete api.defaults.headers.Authorization;
 
@@ -58,7 +58,7 @@ const handleLogin = async (e) => {
     localStorage.setItem("token", token);
     api.defaults.headers.Authorization = `Bearer ${token}`;
 
-    // ✅ SAVE USER (THIS IS CRITICAL)
+    // ✅ SAVE USER
     localStorage.setItem(
       "user",
       JSON.stringify({
@@ -73,12 +73,32 @@ const handleLogin = async (e) => {
     );
 
     setLoading(false);
-    nav("/service-home"); // ✅ redirect
+    nav("/service-home"); // ✅ dashboard
 
   } catch (err) {
-    console.error("Service login failed:", err);
-    setMsg("❌ Login failed");
     setLoading(false);
+
+    // 🔥 HANDLE SUBSCRIPTION EXPIRED
+    if (
+      err.response?.status === 403 &&
+      err.response?.data?.error === "SUBSCRIPTION_EXPIRED"
+    ) {
+      const data = err.response.data.data;
+
+      // optional: save temp renewal context
+      localStorage.setItem(
+        "renewalContext",
+        JSON.stringify(data)
+      );
+
+      nav("/renewal", {
+        state: data,
+      });
+      return;
+    }
+
+    console.error("Service login failed:", err);
+    setMsg("❌ Invalid email or password");
   }
 };
 
