@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { fixMediaUrl } from "../utils/fixMediaUrl";
+
 import api from "../api/api";
 import { useNavigate } from "react-router-dom";
 
@@ -91,21 +93,19 @@ export default function ViewProperties() {
               agentId === myId ||
               ownerId === myId;
 
-            const imageUrl = p.images?.[0]
-              ? `${SERVER_URL}${p.images[0]}`
-              : "https://via.placeholder.com/300x180?text=No+Image";
-
+           const imageUrl = p.images?.[0]
+  ? fixMediaUrl(p.images[0])
+  : "/no-image.png";
             return (
               <div key={p._id} style={styles.card}>
                 <img
-                  src={imageUrl}
-                  alt="property"
-                  style={styles.image}
-                  onError={(e) => {
-                    e.target.src =
-                      "https://via.placeholder.com/300x180?text=No+Image";
-                  }}
-                />
+  src={imageUrl}
+  alt="property"
+  style={styles.image}
+  onError={(e) => {
+    e.target.src = "/no-image.png";
+  }}
+/>
 
                 <h3 style={styles.title}>{p.title}</h3>
                 <p style={styles.location}>
