@@ -1,16 +1,18 @@
 import React, { useEffect, useState } from "react";
 import api from "../api/api";
 import { useNavigate } from "react-router-dom";
+import { fixMediaUrl } from "../utils/fixMediaUrl";
 
 export default function ServiceHome() {
   const [services, setServices] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-  // FILTERS
+  // Filters
   const [city, setCity] = useState("All");
   const [area, setArea] = useState("All");
   const [cities, setCities] = useState([]);
   const [areas, setAreas] = useState([]);
-
   const [keyword, setKeyword] = useState("");
   const [budget, setBudget] = useState("");
   const [category, setCategory] = useState("");
@@ -23,21 +25,35 @@ export default function ServiceHome() {
     loadServices();
   }, []);
 
- async function loadServices() {
-  try {
-    const res = await api.get("/services"); // ✅ PUBLIC API
-    const list = res.data || [];
-    setServices(list);
+  async function loadServices() {
+    try {
+      setLoading(true);
+      const res = await api.get("/services");
+      const list = res.data || [];
+      
+      console.log("Services loaded:", list.length);
+      console.log("First service image:", list[0]?.images?.[0]);
+      
+      setServices(list);
 
-    const uniqueCities = [
-      ...new Set(list.map((s) => s.city?.trim()).filter(Boolean)),
-    ];
-    setCities(uniqueCities);
-  } catch (err) {
-    console.error("Failed to load services", err);
+      // Extract unique cities
+      const uniqueCities = [
+        ...new Set(list.map((s) => s.city?.trim()).filter(Boolean)),
+      ];
+      setCities(uniqueCities);
+      setError("");
+    } catch (err) {
+      console.error("❌ Failed to load services", err);
+      setError("Failed to load services. Please try again.");
+      
+      // For testing, use demo data
+      const demoData = getDemoServices();
+      setServices(demoData);
+      setCities(["Mumbai", "Delhi", "Bangalore", "Pune"]);
+    } finally {
+      setLoading(false);
+    }
   }
-}
-
 
   /* ==================== LOAD AREAS ==================== */
   useEffect(() => {
@@ -53,104 +69,128 @@ export default function ServiceHome() {
 
     const extracted = filtered
       .map((s) =>
-        s.location?.address ? s.location.address.split(",")[0].trim() : null
+        s.location?.address
+          ? s.location.address.split(",")[0].trim()
+          : s.area?.trim()
       )
       .filter(Boolean);
 
-    const unique = [...new Set(extracted)];
-    setAreas(unique);
+    setAreas([...new Set(extracted)]);
   }, [city, services]);
 
   /* ==================== FILTER LOGIC ==================== */
-  const filtered = services.filter((s) => {
-    let c = true,
-      a = true,
-      k = true,
-      b = true,
-      cat = true;
+  const filteredServices = services.filter((s) => {
+    let ok = true;
 
-    if (city !== "All")
-      c = s.city?.toLowerCase() === city.toLowerCase();
-
-    if (area !== "All") {
-      const aName =
-        s.location?.address?.split(",")[0]?.trim()?.toLowerCase();
-      a = aName === area.toLowerCase();
+    // City filter
+    if (city !== "All") {
+      ok = ok && s.city?.toLowerCase() === city.toLowerCase();
     }
 
-    if (keyword.trim())
-      k =
-        s.title.toLowerCase().includes(keyword.toLowerCase()) ||
-        s.provider?.name?.toLowerCase().includes(keyword.toLowerCase());
+    // Area filter
+    if (area !== "All") {
+      const serviceArea = s.location?.address?.split(",")[0]?.trim()?.toLowerCase() || 
+                         s.area?.toLowerCase();
+      ok = ok && serviceArea === area.toLowerCase();
+    }
 
-    if (category)
-      cat = s.provider?.serviceCategory === category;
+    // Keyword filter
+    if (keyword.trim()) {
+      const searchTerm = keyword.toLowerCase();
+      const matchesTitle = s.title?.toLowerCase().includes(searchTerm);
+      const matchesProvider = s.provider?.name?.toLowerCase().includes(searchTerm);
+      const matchesDescription = s.description?.toLowerCase().includes(searchTerm);
+      
+      ok = ok && (matchesTitle || matchesProvider || matchesDescription);
+    }
 
+    // Category filter
+    if (category) {
+      ok = ok && s.provider?.serviceCategory === category;
+    }
+
+    // Budget filter
     const price = Number(s.price || 0);
     if (budget) {
-      switch (budget) {
-        case "5000":
-          b = price <= 5000;
-          break;
-        case "10000":
-          b = price > 5000 && price <= 10000;
-          break;
-        case "25000":
-          b = price > 10000 && price <= 25000;
-          break;
-        case "50000":
-          b = price > 25000 && price <= 50000;
-          break;
-        case "50000plus":
-          b = price > 50000;
-          break;
-      }
+      if (budget === "5000") ok = ok && price <= 5000;
+      if (budget === "10000") ok = ok && price > 5000 && price <= 10000;
+      if (budget === "25000") ok = ok && price > 10000 && price <= 25000;
+      if (budget === "50000") ok = ok && price > 25000 && price <= 50000;
+      if (budget === "50000plus") ok = ok && price > 50000;
     }
 
-    return c && a && k && b && cat;
+    return ok;
   });
 
   /* ==================== CATEGORY CHIPS ==================== */
   const chipCategories = [
-    "Electrician",
-    "Plumber",
-    "AC Repair",
-    "Carpenter",
-    "Painter",
-    "Interior",
-    "Architect",
-    "Vastu",
+    { name: "", label: "All", icon: "🔍", color: "#0066ff" },
+    { name: "Electrician", label: "Electrician", icon: "⚡", color: "#ff9800" },
+    { name: "Plumber", label: "Plumber", icon: "🔧", color: "#2196f3" },
+    { name: "AC Repair", label: "AC Repair", icon: "❄️", color: "#00bcd4" },
+    { name: "Carpenter", label: "Carpenter", icon: "🪚", color: "#795548" },
+    { name: "Painter", label: "Painter", icon: "🎨", color: "#9c27b0" },
+    { name: "Interior", label: "Interior", icon: "🏠", color: "#673ab7" },
+    { name: "Architect", label: "Architect", icon: "📐", color: "#3f51b5" },
+    { name: "Vastu", label: "Vastu", icon: "☯️", color: "#4caf50" },
   ];
+
+  /* ==================== IMAGE HANDLER ==================== */
+  const getImageUrl = (imagePath) => {
+    if (!imagePath) {
+      return "https://via.placeholder.com/300x200/0066ff/ffffff?text=No+Image";
+    }
+    
+    // Use the fixMediaUrl function
+    return fixMediaUrl(imagePath);
+  };
+
+  /* ==================== RESET FILTERS ==================== */
+  const resetFilters = () => {
+    setCity("All");
+    setArea("All");
+    setKeyword("");
+    setBudget("");
+    setCategory("");
+  };
 
   return (
     <div style={styles.page}>
       {/* ANIMATIONS */}
-      <style>
-        {`
-          @keyframes heroAnim {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
-          }
-
-          @keyframes fadeInUp {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-          }
-
-          @keyframes chipBounce {
-            0% { transform: translateY(0); }
-            50% { transform: translateY(-6px); }
-            100% { transform: translateY(0); }
-          }
-
-          @keyframes glowPulse {
-            0% { box-shadow: 0 0 6px rgba(0,255,255,0.2); }
-            50% { box-shadow: 0 0 16px rgba(0,255,200,0.6); }
-            100% { box-shadow: 0 0 6px rgba(0,255,255,0.2); }
-          }
-        `}
-      </style>
+      <style>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        
+        .service-card {
+          transition: all 0.3s ease;
+        }
+        
+        .service-card:hover {
+          transform: translateY(-5px);
+          box-shadow: 0 15px 30px rgba(0, 102, 255, 0.15);
+        }
+        
+        .service-card:hover .card-img {
+          transform: scale(1.05);
+        }
+        
+        .category-chip:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+        
+        @media (max-width: 768px) {
+          .hero-title { font-size: 32px !important; }
+          .search-container { flex-direction: column !important; }
+        }
+      `}</style>
 
       {/* ========================= HERO ========================= */}
       <div style={styles.hero}>
@@ -159,307 +199,904 @@ export default function ServiceHome() {
           AC Repair • Electrician • Plumber • Interior • Architect • Vastu & More
         </p>
 
-        {/* ================== Animated Category Chips ================== */}
+        {/* Category Chips */}
         <div style={styles.chipRow}>
-          {chipCategories.map((c, i) => (
+          {chipCategories.map((cat) => (
             <div
-              key={i}
+              key={cat.name || "all"}
               style={{
                 ...styles.chip,
-                animationDelay: `${i * 0.12}s`,
                 background:
-                  category === c
-                    ? "linear-gradient(90deg, #00d9ff, #0099ff)"
-                    : "rgba(255,255,255,0.12)",
-                color: category === c ? "white" : "#fff",
-                border:
-                  category === c
-                    ? "1px solid rgba(255,255,255,0.25)"
-                    : "1px solid rgba(255,255,255,0.15)",
+                  category === cat.name
+                    ? `linear-gradient(90deg, ${cat.color}, ${cat.color}dd)`
+                    : "rgba(255,255,255,0.15)",
+                border: category === cat.name ? `2px solid ${cat.color}` : "2px solid rgba(255,255,255,0.3)",
               }}
-              onClick={() => setCategory(c === category ? "" : c)}
+              onClick={() => setCategory(cat.name === category ? "" : cat.name)}
+              className="category-chip"
             >
-              {c}
+              <span style={{ marginRight: "8px", fontSize: "16px" }}>{cat.icon}</span>
+              {cat.label}
             </div>
           ))}
         </div>
 
-        {/* ================== Floating Search Bar ================== */}
-        <div style={styles.searchGlass}>
-          <div style={styles.filterItem}>
-            <span style={styles.icon}>📍</span>
+        {/* Search and Filters */}
+        <div style={styles.searchContainer} className="search-container">
+          <div style={styles.filterGroup}>
             <select
               value={city}
               onChange={(e) => setCity(e.target.value)}
               style={styles.select}
             >
-              <option value="All">All Cities</option>
-              {cities.map((c, i) => (
-                <option key={i} value={c}>
-                  {c}
-                </option>
+              <option value="All">📍 All Cities</option>
+              {cities.map((c) => (
+                <option key={c} value={c}>{c}</option>
               ))}
             </select>
           </div>
 
-          {city !== "All" && (
-            <div style={styles.filterItem}>
-              <span style={styles.icon}>📌</span>
+          {city !== "All" && areas.length > 0 && (
+            <div style={styles.filterGroup}>
               <select
                 value={area}
                 onChange={(e) => setArea(e.target.value)}
                 style={styles.select}
               >
-                <option value="All">All Areas</option>
-                {areas.map((a, i) => (
-                  <option key={i} value={a}>
-                    {a}
-                  </option>
+                <option value="All">📌 All Areas</option>
+                {areas.map((a) => (
+                  <option key={a} value={a}>{a}</option>
                 ))}
               </select>
             </div>
           )}
 
-          <div style={styles.filterItem}>
-            <span style={styles.icon}>💰</span>
+          <div style={styles.filterGroup}>
             <select
               value={budget}
               onChange={(e) => setBudget(e.target.value)}
               style={styles.select}
             >
-              <option value="">Budget</option>
+              <option value="">💰 Budget</option>
               <option value="5000">Below ₹5,000</option>
-              <option value="10000">₹5,000 – 10,000</option>
-              <option value="25000">₹10,000 – 25,000</option>
-              <option value="50000">₹25,000 – 50,000</option>
-              <option value="50000plus">Above ₹50,000</option>
+              <option value="10000">₹5k – 10k</option>
+              <option value="25000">₹10k – 25k</option>
+              <option value="50000">₹25k – 50k</option>
+              <option value="50000plus">Above ₹50k</option>
             </select>
           </div>
 
-          <input
-            type="text"
-            placeholder="Search service, provider..."
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            style={styles.searchInput}
-          />
+          <div style={styles.searchGroup}>
+            <input
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="🔍 Search service, provider..."
+              style={styles.searchInput}
+            />
+            {(city !== "All" || area !== "All" || keyword || budget || category) && (
+              <button
+                onClick={resetFilters}
+                style={styles.clearButton}
+                title="Clear all filters"
+              >
+                ✕
+              </button>
+            )}
+          </div>
         </div>
+
+        {/* Active Filters */}
+        {(city !== "All" || area !== "All" || keyword || budget || category) && (
+          <div style={styles.activeFilters}>
+            <span style={styles.activeFiltersLabel}>Active Filters:</span>
+            {city !== "All" && (
+              <span style={styles.activeFilter}>
+                📍 {city}
+                <button onClick={() => setCity("All")}>×</button>
+              </span>
+            )}
+            {area !== "All" && (
+              <span style={styles.activeFilter}>
+                📌 {area}
+                <button onClick={() => setArea("All")}>×</button>
+              </span>
+            )}
+            {category && (
+              <span style={styles.activeFilter}>
+                {chipCategories.find(c => c.name === category)?.icon} {category}
+                <button onClick={() => setCategory("")}>×</button>
+              </span>
+            )}
+            {budget && (
+              <span style={styles.activeFilter}>
+                💰 {
+                  budget === "5000" ? "Under ₹5k" :
+                  budget === "10000" ? "₹5k-10k" :
+                  budget === "25000" ? "₹10k-25k" :
+                  budget === "50000" ? "₹25k-50k" : "Above ₹50k"
+                }
+                <button onClick={() => setBudget("")}>×</button>
+              </span>
+            )}
+            {keyword && (
+              <span style={styles.activeFilter}>
+                🔍 "{keyword}"
+                <button onClick={() => setKeyword("")}>×</button>
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* ========================= SERVICE GRID ========================= */}
-      <h2 style={styles.sectionTitle}>Popular Services</h2>
+      {/* ========================= MAIN CONTENT ========================= */}
+      <div style={styles.container}>
+        <div style={styles.headerRow}>
+          <h2 style={styles.sectionTitle}>
+            Popular Services
+            {filteredServices.length > 0 && (
+              <span style={styles.resultCount}> ({filteredServices.length} found)</span>
+            )}
+          </h2>
+          
+          <button
+            onClick={() => loadServices()}
+            style={styles.refreshButton}
+            title="Refresh services"
+          >
+            🔄 Refresh
+          </button>
+        </div>
 
-      <div style={styles.grid}>
-        {filtered.map((s) => {
-          const image =
-            s.images?.[0]
-              ? `${BASE_URL}${s.images[0]}`
-              : "https://via.placeholder.com/300x200?text=No+Image";
-
-          const areaName =
-            s.location?.address?.split(",")[0]?.trim() || "";
-
-          return (
-            <div key={s._id} style={styles.card}>
-              <div style={styles.cardImgWrap}>
-                <img src={image} style={styles.cardImg} />
-              </div>
-
-              <h3 style={styles.cardTitle}>{s.title}</h3>
-              <p style={styles.cardProvider}>{s.provider?.name}</p>
-              <p style={styles.cardLoc}>
-                📍 {areaName}, {s.city}
-              </p>
-
-              <span style={styles.priceTag}>₹ {s.price}</span>
-
-              <button
-                style={styles.detailBtn}
-                onClick={() => navigate(`/service/${s._id}`)}
-              >
-                View Details →
+        {loading ? (
+          <div style={styles.loadingContainer}>
+            <div style={styles.spinner}></div>
+            <p style={styles.loadingText}>Loading services...</p>
+          </div>
+        ) : error ? (
+          <div style={styles.errorContainer}>
+            <p style={styles.errorText}>{error}</p>
+            <button onClick={() => loadServices()} style={styles.retryButton}>
+              Retry
+            </button>
+          </div>
+        ) : filteredServices.length === 0 ? (
+          <div style={styles.emptyState}>
+            <div style={styles.emptyIcon}>🔍</div>
+            <h3 style={styles.emptyTitle}>No services found</h3>
+            <p style={styles.emptyText}>
+              {services.length > 0 
+                ? "Try adjusting your filters or search term"
+                : "No services available at the moment. Please check back later."
+              }
+            </p>
+            {services.length > 0 && (
+              <button onClick={resetFilters} style={styles.emptyButton}>
+                Clear All Filters
               </button>
+            )}
+          </div>
+        ) : (
+          <>
+            <div style={styles.grid}>
+              {filteredServices.map((s) => {
+                const imageUrl = getImageUrl(s.images?.[0]);
+                const areaName = s.location?.address?.split(",")[0]?.trim() || s.area || "";
+
+                return (
+                  <div 
+                    key={s._id} 
+                    style={styles.card}
+                    className="service-card"
+                    onClick={() => navigate(`/service/${s._id}`)}
+                  >
+                    <div style={styles.imageContainer}>
+                      <img
+                        src={imageUrl}
+                        alt={s.title}
+                        style={styles.cardImg}
+                        className="card-img"
+                        onError={(e) => {
+                          console.error("Image failed to load:", imageUrl);
+                          // Fallback to placeholder
+                          e.target.src = "https://via.placeholder.com/300x200/0066ff/ffffff?text=Service";
+                        }}
+                      />
+                      {/* Badges */}
+                      <div style={styles.badges}>
+                        {s.isVerified && (
+                          <span style={styles.verifiedBadge}>✓ Verified</span>
+                        )}
+                        {s.isPremium && (
+                          <span style={styles.premiumBadge}>⭐ Premium</span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div style={styles.cardContent}>
+                      <h3 style={styles.cardTitle}>{s.title}</h3>
+                      
+                      <div style={styles.providerInfo}>
+                        <div style={styles.providerAvatar}>
+                          {s.provider?.name?.charAt(0) || "P"}
+                        </div>
+                        <div>
+                          <div style={styles.providerName}>{s.provider?.name || "Professional"}</div>
+                          <div style={styles.providerCategory}>
+                            {s.provider?.serviceCategory || "Service Provider"}
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div style={styles.location}>
+                        <span style={styles.locationIcon}>📍</span>
+                        <span style={styles.locationText}>
+                          {areaName}, {s.city || "City not specified"}
+                        </span>
+                      </div>
+
+                      {s.description && (
+                        <p style={styles.description}>
+                          {s.description.length > 80 
+                            ? `${s.description.substring(0, 80)}...` 
+                            : s.description
+                          }
+                        </p>
+                      )}
+
+                      <div style={styles.footer}>
+                        <div style={styles.priceSection}>
+                          <div style={styles.priceLabel}>Starting from</div>
+                          <div style={styles.price}>₹ {s.price?.toLocaleString("en-IN") || "On Request"}</div>
+                        </div>
+                        
+                        <div style={styles.rating}>
+                          <span style={styles.stars}>★★★★★</span>
+                          <span style={styles.ratingText}>
+                            {s.rating || "4.5"} ({s.reviews || 0})
+                          </span>
+                        </div>
+                      </div>
+
+                      <button
+                        style={styles.detailBtn}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(`/service/${s._id}`);
+                        }}
+                      >
+                        View Details →
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          );
-        })}
+            
+            {/* Stats */}
+            <div style={styles.stats}>
+              <h3 style={styles.statsTitle}>Service Statistics</h3>
+              <div style={styles.statsGrid}>
+                <div style={styles.stat}>
+                  <div style={styles.statNumber}>{services.length}</div>
+                  <div style={styles.statLabel}>Total Services</div>
+                </div>
+                <div style={styles.stat}>
+                  <div style={styles.statNumber}>{new Set(services.map(s => s.provider?._id)).size}</div>
+                  <div style={styles.statLabel}>Providers</div>
+                </div>
+                <div style={styles.stat}>
+                  <div style={styles.statNumber}>{cities.length}</div>
+                  <div style={styles.statLabel}>Cities</div>
+                </div>
+                <div style={styles.stat}>
+                  <div style={styles.statNumber}>4.8</div>
+                  <div style={styles.statLabel}>Avg Rating</div>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-/* ========================= STYLES ========================= */
+/* ==================== DEMO DATA ==================== */
+function getDemoServices() {
+  return [
+    {
+      _id: "1",
+      title: "AC Repair & Service",
+      description: "Professional AC repair, servicing, and gas refill with warranty",
+      price: 1499,
+      city: "Mumbai",
+      area: "Andheri West",
+      provider: {
+        name: "Cool Air Services",
+        serviceCategory: "AC Repair"
+      },
+      rating: 4.7,
+      reviews: 128,
+      isVerified: true,
+      images: ["/uploads/ac-repair.jpg"]
+    },
+    {
+      _id: "2",
+      title: "Electrician Services",
+      description: "Complete electrical wiring, repairs, and installations",
+      price: 899,
+      city: "Delhi",
+      area: "Connaught Place",
+      provider: {
+        name: "Power Electricians",
+        serviceCategory: "Electrician"
+      },
+      rating: 4.5,
+      reviews: 89,
+      isVerified: true,
+      images: ["/uploads/electrician.jpg"]
+    },
+    {
+      _id: "3",
+      title: "Plumbing Solutions",
+      description: "Leak repair, pipe fitting, bathroom plumbing",
+      price: 699,
+      city: "Bangalore",
+      area: "Koramangala",
+      provider: {
+        name: "Aqua Plumbers",
+        serviceCategory: "Plumber"
+      },
+      rating: 4.6,
+      reviews: 76,
+      isVerified: true,
+      images: ["/uploads/plumber.jpg"]
+    }
+  ];
+}
 
+/* ==================== STYLES ==================== */
 const styles = {
-  page: { background: "#f6f8fc", minHeight: "100vh" },
+  page: { 
+    background: "linear-gradient(180deg, #f8fafc 0%, #ffffff 100%)", 
+    minHeight: "100vh",
+    fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif"
+  },
 
-  /* HERO */
+  // Hero Section
   hero: {
-    padding: "80px 20px 130px",
+    padding: "60px 20px 80px",
     textAlign: "center",
-    background:
-      "linear-gradient(-45deg, #0066ff, #00c2ff, #0099ff, #00eaff)",
-    backgroundSize: "400% 400%",
-    animation: "heroAnim 10s infinite",
-    color: "white",
+    background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+    color: "#fff",
+    position: "relative",
+    animation: "fadeIn 0.8s ease-out"
   },
 
   heroTitle: {
-    fontSize: 42,
+    fontSize: "48px",
     fontWeight: 900,
-    animation: "fadeInUp 0.8s ease",
+    marginBottom: "16px",
+    lineHeight: 1.2
   },
 
   heroSub: {
-    fontSize: 17,
-    marginTop: 6,
+    fontSize: "18px",
     opacity: 0.9,
-    animation: "fadeInUp 1s ease",
+    maxWidth: "600px",
+    margin: "0 auto 30px"
   },
 
-  /* CATEGORY CHIPS */
   chipRow: {
-    marginTop: 25,
     display: "flex",
-    gap: 12,
+    gap: "12px",
     justifyContent: "center",
     flexWrap: "wrap",
+    marginBottom: "30px"
   },
 
   chip: {
-    padding: "10px 18px",
-    borderRadius: 30,
-    fontWeight: 600,
+    padding: "12px 20px",
+    borderRadius: "30px",
     cursor: "pointer",
-    fontSize: 14,
-    animation: "chipBounce 1.6s ease infinite",
-    animationIterationCount: "infinite",
-    transition: "0.3s",
-    backdropFilter: "blur(4px)",
+    color: "#fff",
+    fontWeight: 600,
+    fontSize: "14px",
+    display: "flex",
+    alignItems: "center",
+    transition: "all 0.3s ease",
+    backdropFilter: "blur(10px)"
   },
 
-  /* GLASS SEARCH BAR */
-  searchGlass: {
-    margin: "28px auto 0",
-    maxWidth: 1000,
-    padding: "18px 22px",
+  searchContainer: {
+    maxWidth: "1000px",
+    margin: "0 auto",
     display: "flex",
-    gap: 14,
+    gap: "12px",
     flexWrap: "wrap",
-    alignItems: "center",
-    background: "rgba(255,255,255,0.12)",
-    backdropFilter: "blur(14px)",
-    borderRadius: 18,
-    border: "1px solid rgba(255,255,255,0.25)",
-    animation: "fadeInUp 1.4s ease",
+    justifyContent: "center"
   },
 
-  filterItem: {
+  filterGroup: {
+    flex: 1,
+    minWidth: "180px"
+  },
+
+  searchGroup: {
+    flex: 2,
+    minWidth: "250px",
     display: "flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "10px 14px",
-    borderRadius: 14,
-    background: "rgba(255,255,255,0.15)",
-    border: "1px solid rgba(255,255,255,0.2)",
+    gap: "8px"
   },
-
-  icon: { fontSize: 20 },
 
   select: {
+    width: "100%",
+    padding: "12px 16px",
+    borderRadius: "10px",
     border: "none",
-    background: "transparent",
-    outline: "none",
-    color: "blue",
-    fontSize: 15,
+    background: "rgba(255,255,255,0.15)",
+    color: "white",
+    fontSize: "14px",
     cursor: "pointer",
+    backdropFilter: "blur(10px)",
+    "&:focus": {
+      outline: "none",
+      boxShadow: "0 0 0 2px rgba(255,255,255,0.3)"
+    },
+    "& option": {
+      color: "#333",
+      background: "white"
+    }
   },
 
   searchInput: {
     flex: 1,
-    minWidth: 200,
-    padding: "12px 14px",
-    borderRadius: 14,
-    background: "rgba(255,255,255,0.18)",
-    border: "1px solid rgba(255,255,255,0.25)",
-    outline: "none",
+    padding: "12px 16px",
+    borderRadius: "10px",
+    border: "none",
+    background: "rgba(255,255,255,0.15)",
     color: "white",
-    fontSize: 15,
+    fontSize: "14px",
+    backdropFilter: "blur(10px)",
+    "&:focus": {
+      outline: "none",
+      boxShadow: "0 0 0 2px rgba(255,255,255,0.3)"
+    },
+    "&::placeholder": {
+      color: "rgba(255,255,255,0.7)"
+    }
   },
 
-  /* CARDS */
+  clearButton: {
+    padding: "12px 16px",
+    borderRadius: "10px",
+    border: "none",
+    background: "rgba(255,255,255,0.15)",
+    color: "white",
+    cursor: "pointer",
+    fontSize: "16px",
+    backdropFilter: "blur(10px)",
+    "&:hover": {
+      background: "rgba(255,255,255,0.25)"
+    }
+  },
+
+  activeFilters: {
+    maxWidth: "1000px",
+    margin: "20px auto 0",
+    padding: "12px 20px",
+    background: "rgba(0,0,0,0.2)",
+    borderRadius: "12px",
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "8px",
+    alignItems: "center"
+  },
+
+  activeFiltersLabel: {
+    fontSize: "14px",
+    fontWeight: 600,
+    color: "rgba(255,255,255,0.8)",
+    marginRight: "8px"
+  },
+
+  activeFilter: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "6px",
+    padding: "6px 12px",
+    background: "rgba(255,255,255,0.15)",
+    borderRadius: "20px",
+    fontSize: "13px",
+    "& button": {
+      background: "none",
+      border: "none",
+      color: "rgba(255,255,255,0.7)",
+      cursor: "pointer",
+      fontSize: "16px",
+      padding: "0",
+      width: "18px",
+      height: "18px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      "&:hover": {
+        color: "white"
+      }
+    }
+  },
+
+  // Main Content
+  container: {
+    maxWidth: "1200px",
+    margin: "-40px auto 0",
+    padding: "0 20px 40px",
+    position: "relative",
+    zIndex: 1
+  },
+
+  headerRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: "30px",
+    animation: "fadeIn 0.6s ease-out"
+  },
+
   sectionTitle: {
-    fontSize: 26,
+    fontSize: "28px",
     fontWeight: 800,
-    marginTop: 25,
-    marginLeft: 18,
-    color: "#222",
+    color: "#1a1a1a",
+    margin: 0
   },
 
+  resultCount: {
+    fontSize: "16px",
+    fontWeight: 400,
+    color: "#666",
+    marginLeft: "10px"
+  },
+
+  refreshButton: {
+    padding: "8px 16px",
+    background: "#0066ff",
+    border: "none",
+    borderRadius: "8px",
+    color: "white",
+    fontSize: "14px",
+    fontWeight: 600,
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    "&:hover": {
+      background: "#0052cc"
+    }
+  },
+
+  // Loading, Error, Empty States
+  loadingContainer: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "80px 20px",
+    textAlign: "center"
+  },
+
+  spinner: {
+    width: "50px",
+    height: "50px",
+    border: "4px solid #f3f3f3",
+    borderTop: "4px solid #0066ff",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite",
+    marginBottom: "20px"
+  },
+
+  loadingText: {
+    fontSize: "16px",
+    color: "#666"
+  },
+
+  errorContainer: {
+    padding: "60px 20px",
+    textAlign: "center",
+    background: "#fff",
+    borderRadius: "16px",
+    boxShadow: "0 8px 30px rgba(0,0,0,0.1)"
+  },
+
+  errorText: {
+    color: "#d32f2f",
+    fontSize: "16px",
+    marginBottom: "20px"
+  },
+
+  retryButton: {
+    padding: "12px 24px",
+    background: "#0066ff",
+    border: "none",
+    borderRadius: "8px",
+    color: "white",
+    fontSize: "14px",
+    fontWeight: 600,
+    cursor: "pointer",
+    "&:hover": {
+      background: "#0052cc"
+    }
+  },
+
+  emptyState: {
+    padding: "80px 20px",
+    textAlign: "center",
+    background: "#fff",
+    borderRadius: "16px",
+    boxShadow: "0 8px 30px rgba(0,0,0,0.1)"
+  },
+
+  emptyIcon: {
+    fontSize: "60px",
+    marginBottom: "20px",
+    opacity: 0.5
+  },
+
+  emptyTitle: {
+    fontSize: "24px",
+    fontWeight: 600,
+    color: "#333",
+    marginBottom: "12px"
+  },
+
+  emptyText: {
+    fontSize: "16px",
+    color: "#666",
+    marginBottom: "20px",
+    maxWidth: "400px",
+    margin: "0 auto"
+  },
+
+  emptyButton: {
+    padding: "12px 24px",
+    background: "transparent",
+    border: "2px solid #0066ff",
+    borderRadius: "8px",
+    color: "#0066ff",
+    fontSize: "14px",
+    fontWeight: 600,
+    cursor: "pointer",
+    "&:hover": {
+      background: "#0066ff",
+      color: "white"
+    }
+  },
+
+  // Grid and Cards
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(290px, 1fr))",
-    gap: 25,
-    padding: 20,
+    gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
+    gap: "25px",
+    marginBottom: "40px",
+    animation: "fadeIn 0.6s ease-out"
   },
 
   card: {
     background: "white",
-    borderRadius: 18,
-    boxShadow: "0 6px 20px rgba(0,0,0,0.15)",
-    padding: 16,
-    transition: "0.3s",
+    borderRadius: "16px",
+    overflow: "hidden",
+    boxShadow: "0 8px 25px rgba(0,0,0,0.1)",
+    cursor: "pointer",
+    position: "relative"
   },
 
-  cardImgWrap: {
-    height: 180,
-    overflow: "hidden",
-    borderRadius: 14,
+  imageContainer: {
+    position: "relative",
+    height: "200px",
+    overflow: "hidden"
   },
 
   cardImg: {
     width: "100%",
     height: "100%",
     objectFit: "cover",
-    transition: "0.3s",
+    transition: "transform 0.5s ease"
+  },
+
+  badges: {
+    position: "absolute",
+    top: "12px",
+    left: "12px",
+    display: "flex",
+    gap: "6px"
+  },
+
+  verifiedBadge: {
+    background: "#4caf50",
+    color: "white",
+    fontSize: "11px",
+    fontWeight: 600,
+    padding: "4px 8px",
+    borderRadius: "12px",
+    backdropFilter: "blur(10px)"
+  },
+
+  premiumBadge: {
+    background: "linear-gradient(90deg, #ff9800, #ff5722)",
+    color: "white",
+    fontSize: "11px",
+    fontWeight: 600,
+    padding: "4px 8px",
+    borderRadius: "12px",
+    backdropFilter: "blur(10px)"
+  },
+
+  cardContent: {
+    padding: "20px"
   },
 
   cardTitle: {
-    marginTop: 10,
+    fontSize: "18px",
     fontWeight: 700,
-    fontSize: 18,
+    color: "#1a1a1a",
+    marginBottom: "12px",
+    lineHeight: 1.3
   },
 
-  cardProvider: {
-    marginTop: 5,
-    color: "#555",
+  providerInfo: {
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+    marginBottom: "12px"
   },
 
-  cardLoc: {
-    marginTop: 5,
-    color: "#777",
-  },
-
-  priceTag: {
-    marginTop: 10,
-    display: "inline-block",
-    padding: "8px 14px",
-    background: "linear-gradient(90deg, #00c2ff, #008aff)",
+  providerAvatar: {
+    width: "36px",
+    height: "36px",
+    borderRadius: "50%",
+    background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
     color: "white",
-    borderRadius: 10,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "14px",
+    fontWeight: 600
+  },
+
+  providerName: {
+    fontSize: "14px",
+    fontWeight: 600,
+    color: "#333"
+  },
+
+  providerCategory: {
+    fontSize: "12px",
+    color: "#666"
+  },
+
+  location: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    marginBottom: "12px"
+  },
+
+  locationIcon: {
+    fontSize: "14px",
+    color: "#666"
+  },
+
+  locationText: {
+    fontSize: "13px",
+    color: "#666"
+  },
+
+  description: {
+    fontSize: "13px",
+    color: "#555",
+    lineHeight: 1.5,
+    marginBottom: "15px"
+  },
+
+  footer: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: "15px"
+  },
+
+  priceSection: {
+    display: "flex",
+    flexDirection: "column"
+  },
+
+  priceLabel: {
+    fontSize: "11px",
+    color: "#999",
+    marginBottom: "4px"
+  },
+
+  price: {
+    fontSize: "20px",
     fontWeight: 700,
-    boxShadow: "0 6px 20px rgba(0,150,255,0.4)",
+    color: "#1a1a1a"
+  },
+
+  rating: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px"
+  },
+
+  stars: {
+    color: "#ffd700",
+    fontSize: "14px"
+  },
+
+  ratingText: {
+    fontSize: "12px",
+    color: "#666"
   },
 
   detailBtn: {
-    marginTop: 14,
-    padding: "12px",
     width: "100%",
-    background: "#0066ff",
+    padding: "12px",
+    background: "linear-gradient(135deg, #0066ff 0%, #0052cc 100%)",
     border: "none",
-    borderRadius: 10,
+    borderRadius: "8px",
     color: "white",
+    fontSize: "14px",
     fontWeight: 700,
     cursor: "pointer",
-    transition: "0.25s",
+    transition: "all 0.3s",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "8px",
+    "&:hover": {
+      transform: "translateY(-2px)",
+      boxShadow: "0 8px 20px rgba(0, 102, 255, 0.3)"
+    }
   },
+
+  // Stats
+  stats: {
+    background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+    borderRadius: "16px",
+    padding: "30px",
+    color: "white",
+    marginTop: "40px"
+  },
+
+  statsTitle: {
+    fontSize: "22px",
+    fontWeight: 700,
+    marginBottom: "25px",
+    textAlign: "center"
+  },
+
+  statsGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+    gap: "20px"
+  },
+
+  stat: {
+    textAlign: "center",
+    padding: "20px",
+    background: "rgba(255,255,255,0.1)",
+    borderRadius: "12px",
+    backdropFilter: "blur(10px)",
+    border: "1px solid rgba(255,255,255,0.2)"
+  },
+
+  statNumber: {
+    fontSize: "32px",
+    fontWeight: 700,
+    marginBottom: "8px"
+  },
+
+  statLabel: {
+    fontSize: "14px",
+    opacity: 0.9
+  }
 };

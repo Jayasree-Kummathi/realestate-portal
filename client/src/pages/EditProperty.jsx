@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from "react";
 import api from "../api/api";
 import { useNavigate, useParams } from "react-router-dom";
+import { fixMediaUrl } from "../utils/fixMediaUrl";
 
 export default function EditPropertyAdvanced() {
   const { id } = useParams();
@@ -20,7 +21,12 @@ export default function EditPropertyAdvanced() {
   const [removeImageIndexes, setRemoveImageIndexes] = useState(new Set());
   const [videoFile, setVideoFile] = useState(null);
 
-  const BASE_URL = "http://localhost:4000";
+  // Memory leak fix for preview URLs
+  useEffect(() => {
+    return () => {
+      previewImages.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [previewImages]);
 
   /* ---------------- LOAD PROPERTY ---------------- */
   useEffect(() => {
@@ -43,6 +49,16 @@ export default function EditPropertyAdvanced() {
     init();
   }, [id]);
 
+  /* ---------------- AUTH CHECK ---------------- */
+  const canEdit = (() => {
+    const me = JSON.parse(localStorage.getItem("user") || "{}");
+    if (me.isAdmin) return true;
+    return (
+      String(property?.agent?._id) === String(me._id) ||
+      String(property?.owner?._id) === String(me._id)
+    );
+  })();
+
   if (loading) return <div style={styles.container}><p>Loading…</p></div>;
   if (!property) return <div style={styles.container}><p>No property selected for edit.</p></div>;
 
@@ -61,6 +77,7 @@ export default function EditPropertyAdvanced() {
   };
 
   const removeNewImage = (index) => {
+    URL.revokeObjectURL(previewImages[index]);
     setImagesToUpload((prev) => prev.filter((_, i) => i !== index));
     setPreviewImages((prev) => prev.filter((_, i) => i !== index));
   };
@@ -80,6 +97,11 @@ export default function EditPropertyAdvanced() {
   /* ---------------- SUBMIT ---------------- */
   const handleSubmit = async (e) => {
     e.preventDefault();
+    
+    if (!canEdit) {
+      setMsg("❌ You are not authorized to edit this property.");
+      return;
+    }
 
     try {
       const fd = new FormData();
@@ -91,7 +113,6 @@ export default function EditPropertyAdvanced() {
       fd.append("address", property.address || "");
       fd.append("nearbyHighway", property.nearbyHighway || "");
       fd.append("listingType", property.listingType || "Sell");
-
 
       if (removeImageIndexes.size > 0) {
         fd.append("removeImages", JSON.stringify(Array.from(removeImageIndexes)));
@@ -117,17 +138,6 @@ export default function EditPropertyAdvanced() {
       setMsg("❌ Update failed: " + (err.response?.data?.error || err.message));
     }
   };
-
-  /* ---------------- AUTH CHECK ---------------- */
-  const canEdit = (() => {
-    const me = JSON.parse(localStorage.getItem("user") || "{}");
-    if (me.isAdmin) return true;
-
-    return (
-      property.agent?._id === me._id ||
-      property.owner?._id === me._id
-    );
-  })();
 
   return (
     <div style={styles.container}>
@@ -162,24 +172,23 @@ export default function EditPropertyAdvanced() {
         </div>
 
         <div style={styles.row}>
-  <label style={styles.label}>
-    Listing Type
-    <select
-      name="listingType"
-      value={property.listingType || "Sell"}
-      onChange={handleChange}
-      style={styles.input}
-    >
-      <option value="Sell">For Sale</option>
-      <option value="Rent">For Rent</option>
-      <option value="Lease">For Lease</option>
-      <option value="PG">PG / Hostel</option>
-      <option value="Farm Lease">Farm Lease</option>
-      <option value="Others">Others</option>
-    </select>
-  </label>
-</div>
-
+          <label style={styles.label}>
+            Listing Type
+            <select
+              name="listingType"
+              value={property.listingType || "Sell"}
+              onChange={handleChange}
+              style={styles.input}
+            >
+              <option value="Sell">For Sale</option>
+              <option value="Rent">For Rent</option>
+              <option value="Lease">For Lease</option>
+              <option value="PG">PG / Hostel</option>
+              <option value="Farm Lease">Farm Lease</option>
+              <option value="Others">Others</option>
+            </select>
+          </label>
+        </div>
 
         <label style={styles.label}>
           Description
@@ -227,11 +236,11 @@ export default function EditPropertyAdvanced() {
         <h4>Existing Images</h4>
         <div style={styles.thumbRow}>
           {existingImages.map((img, index) => {
-            const url = img.startsWith("/uploads") ? BASE_URL + img : img;
+            const url = fixMediaUrl(img);
             const marked = removeImageIndexes.has(index);
             return (
               <div key={index} style={styles.thumb}>
-                <img src={url} style={styles.thumbImg} />
+                <img src={url} style={styles.thumbImg} alt={`Property ${index + 1}`} />
                 <button
                   type="button"
                   onClick={() => toggleRemoveExistingImage(index)}
@@ -251,7 +260,7 @@ export default function EditPropertyAdvanced() {
         <div style={styles.thumbRow}>
           {previewImages.map((url, index) => (
             <div key={index} style={styles.thumb}>
-              <img src={url} style={styles.thumbImg} />
+              <img src={url} style={styles.thumbImg} alt={`New image ${index + 1}`} />
               <button type="button" onClick={() => removeNewImage(index)} style={styles.removeBtn}>
                 Remove
               </button>
@@ -264,7 +273,7 @@ export default function EditPropertyAdvanced() {
         <p>
           Existing:{" "}
           {property.videoUrl ? (
-            <a href={BASE_URL + property.videoUrl} target="_blank">
+            <a href={fixMediaUrl(property.videoUrl)} target="_blank" rel="noreferrer">
               View Video
             </a>
           ) : (
@@ -278,7 +287,7 @@ export default function EditPropertyAdvanced() {
           <button type="button" onClick={() => nav(-1)} style={styles.cancelBtn}>
             Cancel
           </button>
-          <button type="submit" style={styles.saveBtn}>
+          <button type="submit" style={styles.saveBtn} disabled={!canEdit}>
             Save
           </button>
         </div>
@@ -300,8 +309,22 @@ const styles = {
   thumbRow: { display: "flex", flexWrap: "wrap", gap: 12, marginTop: 10 },
   thumb: { width: 130, border: "1px solid #eee", borderRadius: 6, padding: 6, textAlign: "center" },
   thumbImg: { width: "100%", height: 90, objectFit: "cover", borderRadius: 6 },
-  removeBtn: { padding: "5px 8px", background: "#e74c3c", color: "#fff", borderRadius: 6, border: "none" },
-  unremoveBtn: { padding: "5px 8px", background: "#888", color: "#fff", borderRadius: 6, border: "none" },
-  saveBtn: { padding: "8px 14px", background: "#007bff", color: "#fff", border: "none", borderRadius: 6, marginLeft: 8 },
-  cancelBtn: { padding: "8px 14px", background: "#ccc", border: "none", borderRadius: 6 },
+  removeBtn: { padding: "5px 8px", background: "#e74c3c", color: "#fff", borderRadius: 6, border: "none", cursor: "pointer" },
+  unremoveBtn: { padding: "5px 8px", background: "#888", color: "#fff", borderRadius: 6, border: "none", cursor: "pointer" },
+  saveBtn: { 
+    padding: "8px 14px", 
+    background: "#007bff", 
+    color: "#fff", 
+    border: "none", 
+    borderRadius: 6, 
+    marginLeft: 8,
+    cursor: "pointer"
+  },
+  cancelBtn: { 
+    padding: "8px 14px", 
+    background: "#ccc", 
+    border: "none", 
+    borderRadius: 6, 
+    cursor: "pointer" 
+  },
 };

@@ -2,7 +2,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import api from "../api/api";
 import { useNavigate } from "react-router-dom";
-
+import { fixMediaUrl } from "../utils/fixMediaUrl";
 
 export default function Home() {
   const [properties, setProperties] = useState([]);
@@ -19,37 +19,62 @@ export default function Home() {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [popularLocalities, setPopularLocalities] = useState([]);
   const [nearbyLocalities, setNearbyLocalities] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [activeFilterCount, setActiveFilterCount] = useState(0);
+  const [showMobileFilters, setShowMobileFilters] = useState(false);
+  const [selectedPropertyTypes, setSelectedPropertyTypes] = useState([]);
+  
   const suggestTimer = useRef(null);
   
   const slideImages = [
-  "https://images.unsplash.com/photo-1613490493576-7fde63acd811?auto=format&fit=crop&w=1600&q=80",
-  "https://images.unsplash.com/photo-1568605117036-5fe5e7bab0b7?auto=format&fit=crop&w=1600&q=80",
-  "https://images.unsplash.com/photo-1612637968894-660373e23b03?auto=format&fit=crop&w=1600&q=80",
-  "https://images.unsplash.com/photo-1518780664697-55e3ad937233?auto=format&fit=crop&w=1600&q=80",
-  "https://images.unsplash.com/photo-1475855581690-80accde3ae2b?auto=format&fit=crop&w=1600&q=80",
-  "https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?auto=format&fit=crop&w=1600&q=80"
-];
+    "https://images.unsplash.com/photo-1613490493576-7fde63acd811?auto=format&fit=crop&w=1600&q=80",
+    "https://images.unsplash.com/photo-1568605117036-5fe5e7bab0b7?auto=format&fit=crop&w=1600&q=80",
+    "https://images.unsplash.com/photo-1612637968894-660373e23b03?auto=format&fit=crop&w=1600&q=80",
+    "https://images.unsplash.com/photo-1518780664697-55e3ad937233?auto=format&fit=crop&w=1600&q=80",
+    "https://images.unsplash.com/photo-1475855581690-80accde3ae2b?auto=format&fit=crop&w=1600&q=80",
+    "https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?auto=format&fit=crop&w=1600&q=80"
+  ];
+  
   const [currentSlide, setCurrentSlide] = useState(0);
   const slideIntervalRef = useRef(null);
   const parallaxRef = useRef(0);
   const servicesSliderRef = useRef(null);
   const servicesIntervalRef = useRef(null);
+  const statsRef = useRef({ views: 1248, saved: 342, inquiries: 89 });
+  const lastScrollY = useRef(0);
+  const searchBarRef = useRef(null);
 
   const navigate = useNavigate();
-  const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
 
   /* ------------------ initial load ------------------ */
   useEffect(() => {
     loadProperties();
     loadCities();
     loadServices();
-  }, []);
+    updateActiveFilterCount();
+  }, [city, area, type, listingType, budget, keyword]);
 
   useEffect(() => {
     startSlideRotation();
     
     const onScroll = () => {
       parallaxRef.current = window.scrollY;
+      
+      // Sticky search bar effect
+      if (searchBarRef.current) {
+        const searchBar = searchBarRef.current;
+        const scrollTop = window.scrollY;
+        
+        if (scrollTop > 300) {
+          searchBar.style.transform = "translateY(0)";
+          searchBar.style.opacity = "1";
+          searchBar.style.boxShadow = "0 10px 40px rgba(0,0,0,0.15)";
+        } else {
+          searchBar.style.transform = "translateY(-10px)";
+          searchBar.style.opacity = "0.95";
+          searchBar.style.boxShadow = "0 20px 50px rgba(10,20,40,0.12)";
+        }
+      }
     };
 
     window.addEventListener("scroll", onScroll, { passive: true });
@@ -78,11 +103,10 @@ export default function Home() {
         if (servicesSliderRef.current) {
           const { scrollLeft, scrollWidth, clientWidth } = servicesSliderRef.current;
           
-          // If reached the end, reset to start
           if (scrollLeft + clientWidth >= scrollWidth - 10) {
             servicesSliderRef.current.scrollTo({
               left: 0,
-              behavior: "instant"
+              behavior: "smooth"
             });
           } else {
             servicesSliderRef.current.scrollBy({
@@ -91,7 +115,7 @@ export default function Home() {
             });
           }
         }
-      }, 20);
+      }, 30);
     };
 
     startAutoScroll();
@@ -108,7 +132,7 @@ export default function Home() {
     stopSlideRotation();
     slideIntervalRef.current = setInterval(() => {
       setCurrentSlide((s) => (s + 1) % slideImages.length);
-    }, 4500);
+    }, 5000);
   };
 
   const stopSlideRotation = () => {
@@ -120,12 +144,16 @@ export default function Home() {
 
   const loadProperties = async () => {
     try {
+      setLoading(true);
       const res = await api.get("/properties");
-      setProperties(res.data || []);
-      computePopularLocalities(res.data || []);
+      const data = res.data || [];
+      setProperties(data);
+      computePopularLocalities(data);
     } catch (err) {
       console.error("Failed to load properties", err);
       setProperties([]);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -139,48 +167,88 @@ export default function Home() {
     }
   };
 
-  // In Home.jsx, change the loadServices function:
-const loadServices = async () => {
-  try {
-    // Use the existing company-banners endpoint
-    const res = await api.get("/company-banners");
-    const sorted = (res.data || []).sort((a, b) => a.priority - b.priority);
-    
-    // Transform the data to match the expected structure
-    const transformedServices = sorted.map(banner => ({
-      _id: banner._id,
-      companyName: banner.companyName,
-      serviceType: banner.serviceCategory || "Service",
-      description: banner.description || banner.tagline || `${banner.companyName} - ${banner.serviceCategory || 'Real Estate Service'}`,
-      servicesOffered: banner.services ? banner.services.join(", ") : banner.serviceCategory,
-      contact: banner.phone || "Contact for details",
-      image: banner.image ? `${BASE_URL}${banner.image}` : "https://via.placeholder.com/300x200?text=Company+Image",
-      // Add additional fields if needed
-      serviceCategory: banner.serviceCategory,
-      operatingCities: banner.operatingCities
-    }));
-    
-    setServices(transformedServices);
-  } catch (err) {
-    console.error("Failed to load company banners, using mock data", err);
-    
-    // Fallback to mock data
-    const mockServices = [
-      {
-        _id: "1",
-        companyName: "Skyline Builders",
-        serviceType: "Construction",
-        description: "Leading construction company with 20+ years experience",
-        servicesOffered: "Construction, Renovation, Planning",
-        contact: "+91 9876543210",
-        image: "https://images.unsplash.com/photo-1568605114967-8130f3a36994?auto=format&fit=crop&w=600&q=80"
-      },
-      // ... other mock services
-    ];
-    
-    setServices(mockServices);
-  }
-};
+  const loadServices = async () => {
+    try {
+      const res = await api.get("/company-banners");
+      const sorted = (res.data || []).sort((a, b) => a.priority - b.priority);
+      
+      const transformedServices = sorted.map(banner => ({
+        _id: banner._id,
+        companyName: banner.companyName,
+        serviceType: banner.serviceCategory || "Service",
+        description: banner.description || banner.tagline || `${banner.companyName} - ${banner.serviceCategory || 'Real Estate Service'}`,
+        servicesOffered: banner.services ? banner.services.join(", ") : banner.serviceCategory,
+        contact: banner.phone || "Contact for details",
+        image: banner.image ? fixMediaUrl(banner.image) : "/no-image.png",
+        serviceCategory: banner.serviceCategory,
+        operatingCities: banner.operatingCities
+      }));
+      
+      setServices(transformedServices);
+    } catch (err) {
+      console.error("Failed to load company banners, using mock data", err);
+      
+      const mockServices = [
+        {
+          _id: "1",
+          companyName: "Skyline Builders",
+          serviceType: "Construction",
+          description: "Leading construction company with 20+ years experience",
+          servicesOffered: "Construction, Renovation, Planning",
+          contact: "+91 9876543210",
+          image: "https://images.unsplash.com/photo-1568605114967-8130f3a36994?auto=format&fit=crop&w=600&q=80"
+        },
+        {
+          _id: "2",
+          companyName: "Urban Interiors",
+          serviceType: "Interior Design",
+          description: "Modern interior design for homes and offices",
+          servicesOffered: "Interior Design, Furniture, Space Planning",
+          contact: "+91 9876543211",
+          image: "https://images.unsplash.com/photo-1586023492125-27b2c045efd7?auto=format&fit=crop&w=600&q=80"
+        },
+        {
+          _id: "3",
+          companyName: "Secure Homes",
+          serviceType: "Security",
+          description: "Complete home security solutions",
+          servicesOffered: "CCTV, Alarm Systems, Security Guards",
+          contact: "+91 9876543212",
+          image: "https://images.unsplash.com/photo-1558618666-fcd25c85cd64?auto=format&fit=crop&w=600&q=80"
+        },
+        {
+          _id: "4",
+          companyName: "Green Gardens",
+          serviceType: "Landscaping",
+          description: "Professional landscaping and gardening services",
+          servicesOffered: "Landscape Design, Garden Maintenance, Irrigation",
+          contact: "+91 9876543213",
+          image: "https://images.unsplash.com/photo-1416879595882-3373a0480b5b?auto=format&fit=crop&w=600&q=80"
+        },
+        {
+          _id: "5",
+          companyName: "Smart Electric",
+          serviceType: "Electrical",
+          description: "Licensed electricians for all electrical needs",
+          servicesOffered: "Wiring, Repairs, Installations",
+          contact: "+91 9876543214",
+          image: "https://images.unsplash.com/photo-1621905252507-b35492cc74b4?auto=format&fit=crop&w=600&q=80"
+        },
+        {
+          _id: "6",
+          companyName: "Aqua Flow",
+          serviceType: "Plumbing",
+          description: "24/7 emergency plumbing services",
+          servicesOffered: "Leak Repair, Pipe Installation, Maintenance",
+          contact: "+91 9876543215",
+          image: "https://images.unsplash.com/photo-1558618047-3c8c76ca7d13?auto=format&fit=crop&w=600&q=80"
+        }
+      ];
+      
+      setServices(mockServices);
+    }
+  };
+
   useEffect(() => {
     if (city === "All") {
       setAreas([]);
@@ -388,17 +456,40 @@ const loadServices = async () => {
     setKeyword("");
     setSuggestions([]);
     setShowSuggestions(false);
+    setSelectedPropertyTypes([]);
   };
 
-  const noFiltersApplied =
-    city === "All" &&
-    area === "All" &&
-    type === "" &&
-    listingType === "" &&
-    budget === "" &&
-    keyword.trim() === "";
+  const updateActiveFilterCount = () => {
+    let count = 0;
+    if (city !== "All") count++;
+    if (area !== "All") count++;
+    if (type) count++;
+    if (listingType) count++;
+    if (budget) count++;
+    if (keyword.trim()) count++;
+    setActiveFilterCount(count);
+  };
 
-  const filtered = (noFiltersApplied ? properties : properties).filter((p) => {
+  const propertyTypes = [
+    { id: "apartment", label: "Apartment", icon: "🏢" },
+    { id: "villa", label: "Villa", icon: "🏡" },
+    { id: "plot", label: "Plot", icon: "🗺️" },
+    { id: "house", label: "House", icon: "🏠" },
+    { id: "commercial", label: "Commercial", icon: "🏢" },
+    { id: "farmhouse", label: "Farmhouse", icon: "🌾" }
+  ];
+
+  const handlePropertyTypeClick = (typeId) => {
+    setSelectedPropertyTypes(prev => {
+      if (prev.includes(typeId)) {
+        return prev.filter(id => id !== typeId);
+      } else {
+        return [...prev, typeId];
+      }
+    });
+  };
+
+  const filtered = properties.filter((p) => {
     if (p.active === false) return false;
     if (listingType && p.listingType !== listingType) return false;
 
@@ -454,6 +545,30 @@ const loadServices = async () => {
     return matchCity && matchArea && matchType && matchBudget && matchKeyword;
   });
 
+  // Stats animation
+  useEffect(() => {
+    const animateStats = () => {
+      const incrementStat = (target, current, elementId) => {
+        const increment = Math.ceil(target / 100);
+        if (current < target) {
+          const newValue = Math.min(current + increment, target);
+          const element = document.getElementById(elementId);
+          if (element) {
+            element.textContent = newValue.toLocaleString();
+          }
+          setTimeout(() => incrementStat(target, newValue, elementId), 20);
+        }
+      };
+
+      incrementStat(statsRef.current.views, 0, 'stat-views');
+      incrementStat(statsRef.current.saved, 0, 'stat-saved');
+      incrementStat(statsRef.current.inquiries, 0, 'stat-inquiries');
+    };
+
+    const timeoutId = setTimeout(animateStats, 1000);
+    return () => clearTimeout(timeoutId);
+  }, []);
+
   /* ------------------ UI ------------------ */
   return (
     <div style={styles.container}>
@@ -464,11 +579,61 @@ const loadServices = async () => {
           --hero-parallax-strength: 0.25;
         }
 
+        @keyframes fadeInUp {
+          from {
+            opacity: 0;
+            transform: translateY(30px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+
+        @keyframes float {
+          0%, 100% {
+            transform: translateY(0px);
+          }
+          50% {
+            transform: translateY(-10px);
+          }
+        }
+
+        @keyframes pulse {
+          0%, 100% {
+            opacity: 1;
+          }
+          50% {
+            opacity: 0.7;
+          }
+        }
+
+        @keyframes shimmer {
+          0% {
+            background-position: -200% center;
+          }
+          100% {
+            background-position: 200% center;
+          }
+        }
+
+        @keyframes slideInRight {
+          from {
+            opacity: 0;
+            transform: translateX(30px);
+          }
+          to {
+            opacity: 1;
+            transform: translateX(0);
+          }
+        }
+
         .searchBarFlex {
           display: flex;
           gap: 12px;
           align-items: center;
           flex-wrap: wrap;
+          transition: all 0.3s ease;
         }
 
         .services-scroll-container {
@@ -498,6 +663,52 @@ const loadServices = async () => {
           background: linear-gradient(to left, #f7f9fb 0%, transparent 100%);
         }
 
+        .sticky-search-bar {
+          transition: all 0.3s ease;
+        }
+
+        .property-type-card {
+          transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .property-type-card:hover {
+          transform: translateY(-8px) scale(1.05);
+        }
+
+        .service-card {
+          transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .service-card:hover {
+          transform: translateY(-8px) scale(1.02);
+        }
+
+        .property-card {
+          transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .property-card:hover {
+          transform: translateY(-8px) scale(1.02);
+        }
+
+        .property-card:hover .property-image {
+          transform: scale(1.1);
+        }
+
+        .stats-card {
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          animation: float 6s ease-in-out infinite;
+        }
+
+        .gradient-text {
+          background: linear-gradient(90deg, #667eea, #764ba2, #667eea);
+          background-size: 200% auto;
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          background-clip: text;
+          animation: shimmer 3s linear infinite;
+        }
+
         @media (max-width: 920px) {
           .searchBarFlex {
             gap: 8px;
@@ -505,6 +716,12 @@ const loadServices = async () => {
           .searchItemBox {
             min-width: 110px;
             padding: 8px 10px;
+          }
+          .mobile-filters {
+            display: flex !important;
+          }
+          .desktop-filters {
+            display: none !important;
           }
         }
 
@@ -525,6 +742,31 @@ const loadServices = async () => {
             width: 100% !important;
             margin-bottom: 8px !important;
           }
+          .property-types-grid {
+            grid-template-columns: repeat(2, 1fr) !important;
+          }
+        }
+
+        @media (max-width: 480px) {
+          .property-types-grid {
+            grid-template-columns: 1fr !important;
+          }
+          .stats-grid {
+            grid-template-columns: 1fr !important;
+            gap: 15px !important;
+          }
+        }
+
+        .glass-effect {
+          background: rgba(255, 255, 255, 0.1);
+          backdrop-filter: blur(10px);
+          border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .loading-skeleton {
+          background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+          background-size: 200% 100%;
+          animation: shimmer 1.5s infinite;
         }
       `}</style>
 
@@ -548,34 +790,62 @@ const loadServices = async () => {
             );
           })}
           <div style={styles.heroDarkOverlay} />
+          {/* Slide indicators */}
+          <div style={styles.slideIndicators}>
+            {slideImages.map((_, idx) => (
+              <button
+                key={idx}
+                style={{
+                  ...styles.slideIndicator,
+                  background: idx === currentSlide ? "#fff" : "rgba(255,255,255,0.3)",
+                  width: idx === currentSlide ? "24px" : "8px",
+                }}
+                onClick={() => {
+                  setCurrentSlide(idx);
+                  startSlideRotation();
+                }}
+                aria-label={`Go to slide ${idx + 1}`}
+              />
+            ))}
+          </div>
         </div>
 
         <div style={styles.heroInner}>
           <h1 style={styles.heroTitle}>
-            A Local Guide For All Your Real Estate Needs
+            <span className="gradient-text">Find Your Dream Property</span>
+            <br />
+            In The Perfect Location
           </h1>
           <p style={styles.heroDesc}>
-            Find trusted properties, trending locations and personalized recommendations — fast.
+            Discover trusted properties, trending locations, and personalized recommendations
           </p>
 
-          <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 14 }}>
-            <button
-              style={styles.heroPrimaryBtn}
-              onClick={() => document.getElementById('services-section')?.scrollIntoView({ behavior: 'smooth' })}
-            >
-              Our Services
-            </button>
-            <button
-              style={styles.heroGhostBtn}
-              onClick={() => document.getElementById('properties-section')?.scrollIntoView({ behavior: 'smooth' })}
-            >
-              View Properties
-            </button>
+          <div style={styles.heroStats}>
+            <div style={styles.statItem}>
+              <div style={styles.statNumber} id="stat-views">0</div>
+              <div style={styles.statLabel}>Property Views</div>
+            </div>
+            <div style={styles.statItem}>
+              <div style={styles.statNumber} id="stat-saved">0</div>
+              <div style={styles.statLabel}>Saved Properties</div>
+            </div>
+            <div style={styles.statItem}>
+              <div style={styles.statNumber} id="stat-inquiries">0</div>
+              <div style={styles.statLabel}>Monthly Inquiries</div>
+            </div>
           </div>
         </div>
 
-        <div style={styles.floatingSearchWrapper}>
+        {/* Floating Search Bar */}
+        <div ref={searchBarRef} style={styles.floatingSearchWrapper} className="sticky-search-bar">
           <div style={styles.searchBar} className="searchBarFlex">
+            {/* Active Filters Badge */}
+            {activeFilterCount > 0 && (
+              <div style={styles.activeFilterBadge}>
+                {activeFilterCount} filter{activeFilterCount > 1 ? 's' : ''}
+              </div>
+            )}
+
             <div style={styles.searchItem} className="searchItemBox">
               <span style={styles.icon}>📍</span>
               <select style={styles.select} value={city} onChange={(e) => setCity(e.target.value)}>
@@ -586,15 +856,17 @@ const loadServices = async () => {
               </select>
             </div>
 
-            <div style={{ display: city === "All" ? "none" : "flex", alignItems: "center" }} className="searchItemBox">
-              <span style={styles.icon}>📌</span>
-              <select style={styles.select} value={area} onChange={(e) => setArea(e.target.value)}>
-                <option value="All">All Areas</option>
-                {areas.map((a, i) => (
-                  <option key={i} value={a}>{a}</option>
-                ))}
-              </select>
-            </div>
+            {city !== "All" && (
+              <div style={styles.searchItem} className="searchItemBox">
+                <span style={styles.icon}>📌</span>
+                <select style={styles.select} value={area} onChange={(e) => setArea(e.target.value)}>
+                  <option value="All">All Areas</option>
+                  {areas.map((a, i) => (
+                    <option key={i} value={a}>{a}</option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div style={styles.searchItem} className="searchItemBox">
               <span style={styles.icon}>🏠</span>
@@ -650,22 +922,42 @@ const loadServices = async () => {
                   if (keyword.trim()) setShowSuggestions(true);
                 }}
               />
+              {keyword && (
+                <button
+                  style={styles.clearSearchBtn}
+                  onClick={() => setKeyword("")}
+                  aria-label="Clear search"
+                >
+                  ✕
+                </button>
+              )}
             </div>
 
-            <div style={{ minWidth: 120 }}>
+            <div style={{ minWidth: 120, display: "flex", gap: "8px" }}>
               <button
                 style={styles.searchBtn}
-                onClick={() => {
-                  setShowSuggestions(false);
-                }}
+                onClick={() => setShowSuggestions(false)}
               >
-                Search
+                🔍 Search
               </button>
+              {activeFilterCount > 0 && (
+                <button
+                  style={styles.clearBtn}
+                  onClick={clearFilters}
+                  title="Clear all filters"
+                >
+                  Clear
+                </button>
+              )}
             </div>
           </div>
 
           {showSuggestions && suggestions.length > 0 && (
             <div style={styles.suggestionBox}>
+              <div style={styles.suggestionHeader}>
+                <span>Suggestions</span>
+                <button onClick={() => setShowSuggestions(false)}>✕</button>
+              </div>
               {suggestions.map((s, i) => (
                 <div
                   key={i}
@@ -682,10 +974,11 @@ const loadServices = async () => {
                     setShowSuggestions(false);
                   }}
                 >
-                  <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                  <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
                     <span style={{ fontWeight: 700 }}>{s.value}</span>
-                    <span style={{ color: "#777", fontSize: 12 }}>({s.type})</span>
+                    <span style={styles.suggestionType}>({s.type})</span>
                   </div>
+                  <div style={styles.suggestionArrow}>→</div>
                 </div>
               ))}
             </div>
@@ -693,13 +986,59 @@ const loadServices = async () => {
         </div>
       </section>
 
-      {/* ===== SERVICES SECTION (Right to Left Scrolling) ===== */}
+      {/* ===== PROPERTY TYPES SECTION ===== */}
+      <section style={styles.propertyTypesSection}>
+        <h2 style={styles.sectionTitle}>Browse By Property Type</h2>
+        <p style={styles.sectionSubtitle}>
+          Find the perfect property that matches your lifestyle
+        </p>
+        
+        <div style={styles.propertyTypesGrid} className="property-types-grid">
+          {propertyTypes.map((propType) => (
+            <div
+              key={propType.id}
+              style={{
+                ...styles.propertyTypeCard,
+                border: selectedPropertyTypes.includes(propType.id) 
+                  ? "2px solid #667eea" 
+                  : "2px solid #e6e9ef",
+                background: selectedPropertyTypes.includes(propType.id)
+                  ? "linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%)"
+                  : "#fff"
+              }}
+              className="property-type-card"
+              onClick={() => handlePropertyTypeClick(propType.id)}
+            >
+              <div style={styles.propertyTypeIcon}>{propType.icon}</div>
+              <h3 style={styles.propertyTypeTitle}>{propType.label}</h3>
+              <p style={styles.propertyTypeCount}>
+                {properties.filter(p => p.propertyType?.toLowerCase().includes(propType.id)).length} properties
+              </p>
+              {selectedPropertyTypes.includes(propType.id) && (
+                <div style={styles.selectedBadge}>✓ Selected</div>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* ===== SERVICES SECTION ===== */}
       {services.length > 0 && (
         <section id="services-section" style={styles.servicesSection}>
-          <h2 style={styles.sectionTitle}>Our Trusted Services & Partners</h2>
-          <p style={styles.sectionSubtitle}>
-            Premium services to help you with every aspect of real estate
-          </p>
+          <div style={styles.sectionHeader}>
+            <div>
+              <h2 style={styles.sectionTitle}>Our Trusted Services & Partners</h2>
+              <p style={styles.sectionSubtitle}>
+                Premium services to help you with every aspect of real estate
+              </p>
+            </div>
+            <button
+              style={styles.viewAllBtn}
+              onClick={() => navigate('/services')}
+            >
+              View All Services →
+            </button>
+          </div>
           
           <div className="services-scroll-container">
             <div
@@ -720,7 +1059,7 @@ const loadServices = async () => {
                       if (scrollLeft + clientWidth >= scrollWidth - 10) {
                         servicesSliderRef.current.scrollTo({
                           left: 0,
-                          behavior: "instant"
+                          behavior: "smooth"
                         });
                       } else {
                         servicesSliderRef.current.scrollBy({
@@ -729,15 +1068,15 @@ const loadServices = async () => {
                         });
                       }
                     }
-                  }, 20);
+                  }, 30);
                 }
               }}
             >
-              {/* Render services twice for seamless loop */}
               {[...services, ...services].map((service, index) => (
                 <div 
                   key={`${service._id}-${index}`} 
                   style={styles.serviceCard}
+                  className="service-card"
                 >
                   <div style={styles.serviceImage}>
                     <img
@@ -745,7 +1084,7 @@ const loadServices = async () => {
                       alt={service.companyName}
                       style={{ width: "100%", height: "100%", objectFit: "cover" }}
                       onError={(e) => {
-                        e.target.src = "https://via.placeholder.com/300x200?text=Service+Image";
+                        e.target.src = "/no-image.png";
                       }}
                     />
                     <div style={styles.serviceTypeBadge}>
@@ -783,7 +1122,6 @@ const loadServices = async () => {
                     <button 
                       style={styles.serviceButton}
                       onClick={() => {
-                        // Handle service inquiry
                         alert(`Contact ${service.companyName} at ${service.contact}`);
                       }}
                     >
@@ -800,84 +1138,204 @@ const loadServices = async () => {
       {/* ===== PROPERTIES SECTION ===== */}
       <section id="properties-section" style={styles.propertiesSection}>
         <div style={styles.sectionHeader}>
-          <h2 style={styles.sectionTitle}>Featured Properties</h2>
-          {(city !== "All" || area !== "All" || type || listingType || budget || keyword) && (
-            <button 
-              style={styles.clearFilterBtn}
-              onClick={clearFilters}
-            >
-              Clear Filters
-            </button>
-          )}
-        </div>
-
-        <div style={styles.filterSummary}>
-          Showing {filtered.length} of {properties.length} properties
-          {city !== "All" && ` in ${city}`}
-          {area !== "All" && `, ${area}`}
-          {listingType && ` (${listingType})`}
-          {type && ` (${type})`}
-        </div>
-
-        <div style={styles.grid}>
-          {filtered.length === 0 ? (
-            <div style={styles.noResults}>
-              <h3>No properties found for selected filters</h3>
-              <p>Try adjusting your search criteria</p>
+          <div>
+            <h2 style={styles.sectionTitle}>Featured Properties</h2>
+            <div style={styles.filterSummary}>
+              Showing <strong>{filtered.length}</strong> of <strong>{properties.length}</strong> properties
+              {city !== "All" && <span style={styles.filterTag}>📍 {city}</span>}
+              {area !== "All" && <span style={styles.filterTag}>📌 {area}</span>}
+              {type && <span style={styles.filterTag}>🏠 {type}</span>}
+              {listingType && <span style={styles.filterTag}>📄 {listingType}</span>}
+              {budget && <span style={styles.filterTag}>💰 {budget}</span>}
+            </div>
+          </div>
+          
+          <div style={styles.filterActions}>
+            {(city !== "All" || area !== "All" || type || listingType || budget || keyword) && (
               <button 
                 style={styles.clearFilterBtn}
                 onClick={clearFilters}
               >
-                Clear All Filters
+                ✕ Clear All Filters
               </button>
-            </div>
-          ) : (
-            filtered.map((p) => (
-              <div key={p._id} style={styles.card} onClick={() => navigate(`/property/${p._id}`)}>
+            )}
+            <button 
+              style={styles.mobileFilterBtn}
+              onClick={() => setShowMobileFilters(!showMobileFilters)}
+              className="mobile-filters"
+            >
+              🔧 Filters
+            </button>
+          </div>
+        </div>
+
+        {loading ? (
+          <div style={styles.loadingGrid}>
+            {[1, 2, 3, 4, 5, 6].map((i) => (
+              <div key={i} style={styles.loadingCard}>
+                <div style={styles.loadingImage} className="loading-skeleton" />
+                <div style={styles.loadingContent}>
+                  <div style={styles.loadingTitle} className="loading-skeleton" />
+                  <div style={styles.loadingMeta} className="loading-skeleton" />
+                  <div style={styles.loadingPrice} className="loading-skeleton" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : filtered.length === 0 ? (
+          <div style={styles.noResults}>
+            <div style={styles.noResultsIcon}>🏠</div>
+            <h3 style={styles.noResultsTitle}>No properties found</h3>
+            <p style={styles.noResultsText}>
+              Try adjusting your search criteria or clear filters
+            </p>
+            <button 
+              style={styles.noResultsBtn}
+              onClick={clearFilters}
+            >
+              Clear All Filters
+            </button>
+          </div>
+        ) : (
+          <div style={styles.grid}>
+            {filtered.map((p) => (
+              <div 
+                key={p._id} 
+                style={styles.card} 
+                className="property-card"
+                onClick={() => navigate(`/property/${p._id}`)}
+              >
                 <div style={styles.cardImage}>
-                  <img
-                    src={p.images?.[0] ? `${BASE_URL}${p.images[0]}` : "https://via.placeholder.com/600x350?text=No+Image"}
-                    alt={p.title}
-                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                  />
+                  <div className="property-image" style={styles.propertyImage}>
+                    <img
+                      src={p.images?.[0] ? fixMediaUrl(p.images[0]) : "/no-image.png"}
+                      alt={p.title}
+                      style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                      onError={(e) => {
+                        e.target.src = "/no-image.png";
+                      }}
+                    />
+                  </div>
                   {p.listingType && (
                     <div style={styles.listingBadge}>
                       {p.listingType}
                     </div>
                   )}
+                  {p.isVerified && (
+                    <div style={styles.verifiedBadge}>✓ Verified</div>
+                  )}
+                  <div style={styles.imageOverlay}>
+                    <span>View Details</span>
+                  </div>
                 </div>
 
                 <div style={styles.cardBody}>
-                  <h3 style={styles.cardTitle}>{p.title}</h3>
+                  <div style={styles.cardHeader}>
+                    <h3 style={styles.cardTitle}>{p.title}</h3>
+                    <div style={styles.cardRating}>
+                      ⭐ {p.rating || "4.5"}
+                    </div>
+                  </div>
+                  
                   <div style={styles.metaRow}>
                     <div style={styles.meta}>
                       <span style={styles.metaIcon}>📍</span>
-                      {p.areaName || "Unknown"}
+                      <span style={styles.metaText}>{p.areaName || "Unknown"}</span>
                     </div>
                     <div style={styles.meta}>
                       <span style={styles.metaIcon}>🏙️</span>
-                      {p.city || ""}
+                      <span style={styles.metaText}>{p.city || ""}</span>
                     </div>
-                    {p.propertyType && (
-                      <div style={styles.meta}>
-                        <span style={styles.metaIcon}>🏠</span>
-                        {p.propertyType}
+                  </div>
+                  
+                  {p.propertyType && (
+                    <div style={styles.propertyTypeTag}>
+                      {p.propertyType}
+                    </div>
+                  )}
+                  
+                  {p.description && (
+                    <p style={styles.cardDescription}>
+                      {p.description.length > 100 
+                        ? `${p.description.substring(0, 100)}...` 
+                        : p.description}
+                    </p>
+                  )}
+                  
+                  <div style={styles.cardFooter}>
+                    <div style={styles.price}>
+                      <div style={styles.priceLabel}>Starting from</div>
+                      <div style={styles.priceAmount}>
+                        ₹ {Number(p.price || 0).toLocaleString("en-IN")}
+                        {p.listingType === "Rent" && <span style={styles.rentPeriod}> / month</span>}
                       </div>
-                    )}
+                    </div>
+                    <button 
+                      style={styles.detailBtn}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(`/property/${p._id}`);
+                      }}
+                    >
+                      View Details →
+                    </button>
                   </div>
-                  <div style={styles.price}>
-                    ₹ {Number(p.price || 0).toLocaleString("en-IN")}
-                    {p.listingType === "Rent" && <span style={styles.rentPeriod}> / month</span>}
-                  </div>
-                  <button style={styles.detailBtn}>
-                    View Details
-                  </button>
                 </div>
               </div>
-            ))
-          )}
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* ===== STATS SECTION ===== */}
+      <section style={styles.statsSection}>
+        <h2 style={styles.sectionTitle}>Why Choose Us?</h2>
+        <p style={styles.sectionSubtitle}>
+          Join thousands of satisfied customers who found their dream properties with us
+        </p>
+        
+        <div style={styles.statsGrid} className="stats-grid">
+          <div style={styles.statCard} className="stats-card">
+            <div style={styles.statIcon}>🏆</div>
+            <div style={styles.statNumber}>10,000+</div>
+            <div style={styles.statLabel}>Happy Customers</div>
+          </div>
+          <div style={styles.statCard} className="stats-card">
+            <div style={styles.statIcon}>🔑</div>
+            <div style={styles.statNumber}>5,000+</div>
+            <div style={styles.statLabel}>Properties Sold</div>
+          </div>
+          <div style={styles.statCard} className="stats-card">
+            <div style={styles.statIcon}>⭐</div>
+            <div style={styles.statNumber}>4.8/5</div>
+            <div style={styles.statLabel}>Customer Rating</div>
+          </div>
+          <div style={styles.statCard} className="stats-card">
+            <div style={styles.statIcon}>🏙️</div>
+            <div style={styles.statNumber}>50+</div>
+            <div style={styles.statLabel}>Cities Covered</div>
+          </div>
         </div>
       </section>
+
+      {/* ===== MOBILE FILTERS MODAL ===== */}
+      {showMobileFilters && (
+        <div style={styles.mobileFiltersModal}>
+          <div style={styles.mobileFiltersContent}>
+            <div style={styles.mobileFiltersHeader}>
+              <h3>Filters</h3>
+              <button onClick={() => setShowMobileFilters(false)}>✕</button>
+            </div>
+            <div style={styles.mobileFiltersBody}>
+              {/* Add mobile filter options here */}
+            </div>
+            <div style={styles.mobileFiltersFooter}>
+              <button style={styles.applyFiltersBtn}>Apply Filters</button>
+              <button style={styles.resetFiltersBtn} onClick={clearFilters}>Reset</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -888,24 +1346,25 @@ const styles = {
     padding: "18px 28px",
     marginTop: "10px",
     fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
-    background: "#f7f9fb",
+    background: "linear-gradient(180deg, #f7f9fb 0%, #ffffff 100%)",
     minHeight: "100vh",
   },
 
   /* ----- Hero ----- */
   heroWrap: {
     position: "relative",
-    height: 520,
-    borderRadius: 16,
+    height: "520px",
+    borderRadius: "16px",
     overflow: "visible",
-    marginBottom: 120,
+    marginBottom: "120px",
+    animation: "fadeInUp 0.8s ease-out",
   },
 
   slidesWrap: {
     position: "absolute",
     inset: 0,
     overflow: "hidden",
-    borderRadius: 16,
+    borderRadius: "16px",
   },
 
   slide: {
@@ -917,11 +1376,29 @@ const styles = {
     willChange: "opacity, transform",
   },
 
+  slideIndicators: {
+    position: "absolute",
+    bottom: "20px",
+    left: "50%",
+    transform: "translateX(-50%)",
+    display: "flex",
+    gap: "8px",
+    zIndex: 5,
+  },
+
+  slideIndicator: {
+    height: "8px",
+    borderRadius: "4px",
+    border: "none",
+    cursor: "pointer",
+    transition: "all 0.3s ease",
+    padding: 0,
+  },
+
   heroDarkOverlay: {
     position: "absolute",
     inset: 0,
-    background:
-      "linear-gradient(180deg, rgba(2,6,23,0.25) 0%, rgba(2,6,23,0.55) 60%, rgba(2,6,23,0.72) 100%)",
+    background: "linear-gradient(180deg, rgba(2,6,23,0.25) 0%, rgba(2,6,23,0.55) 60%, rgba(2,6,23,0.72) 100%)",
     mixBlendMode: "multiply",
     pointerEvents: "none",
   },
@@ -933,42 +1410,71 @@ const styles = {
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    paddingTop: 60,
-    paddingLeft: 20,
-    paddingRight: 20,
+    paddingTop: "60px",
+    paddingLeft: "20px",
+    paddingRight: "20px",
     textAlign: "center",
     color: "#fff",
     pointerEvents: "none",
   },
 
   heroTitle: {
-    fontSize: 40,
+    fontSize: "48px",
     fontWeight: 900,
     margin: 0,
-    marginBottom: 12,
-    letterSpacing: -0.5,
+    marginBottom: "16px",
+    letterSpacing: "-0.5px",
     color: "#fff",
     textShadow: "0 6px 26px rgba(2,6,23,0.6)",
     pointerEvents: "auto",
+    lineHeight: 1.2,
   },
 
   heroDesc: {
-    fontSize: 16,
-    maxWidth: 820,
+    fontSize: "18px",
+    maxWidth: "820px",
     opacity: 0.95,
     margin: 0,
+    marginBottom: "30px",
     color: "#f1f5f9",
     pointerEvents: "auto",
   },
 
-  heroPrimaryBtn: {
-    padding: "12px 26px",
-    fontSize: 15,
+  heroStats: {
+    display: "flex",
+    gap: "40px",
+    marginTop: "30px",
+    pointerEvents: "auto",
+  },
+
+  statItem: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+  },
+
+  statNumber: {
+    fontSize: "32px",
     fontWeight: 800,
-    borderRadius: 999,
+    color: "#fff",
+    marginBottom: "4px",
+    textShadow: "0 2px 10px rgba(0,0,0,0.2)",
+  },
+
+  statLabel: {
+    fontSize: "14px",
+    color: "rgba(255,255,255,0.9)",
+    fontWeight: 500,
+  },
+
+  heroPrimaryBtn: {
+    padding: "14px 32px",
+    fontSize: "16px",
+    fontWeight: 800,
+    borderRadius: "999px",
     border: "none",
     cursor: "pointer",
-    background: "linear-gradient(90deg,#ffd34d,#ffb347)",
+    background: "linear-gradient(90deg, #ffd34d, #ffb347)",
     color: "#111",
     boxShadow: "0 12px 40px rgba(0,0,0,0.24)",
     pointerEvents: "auto",
@@ -980,10 +1486,10 @@ const styles = {
   },
 
   heroGhostBtn: {
-    padding: "10px 18px",
-    fontSize: 15,
+    padding: "12px 24px",
+    fontSize: "16px",
     fontWeight: 700,
-    borderRadius: 999,
+    borderRadius: "999px",
     border: "1px solid rgba(255,255,255,0.18)",
     cursor: "pointer",
     background: "transparent",
@@ -998,134 +1504,298 @@ const styles = {
 
   floatingSearchWrapper: {
     position: "absolute",
-    left: "50%",
+    left: "0%",
     transform: "translateX(-50%)",
-    bottom: -60,
+    bottom: "-60px",
     width: "100%",
-    maxWidth: 1500,
+    maxWidth: "1500px",
     zIndex: 6,
-    padding: 14,
+    padding: "14px",
     boxSizing: "border-box",
+    transition: "all 0.3s ease",
+  },
+
+  activeFilterBadge: {
+    position: "absolute",
+    top: "-10px",
+    left: "20px",
+    background: "#667eea",
+    color: "#fff",
+    padding: "4px 12px",
+    borderRadius: "20px",
+    fontSize: "12px",
+    fontWeight: 600,
+    boxShadow: "0 4px 12px rgba(102, 126, 234, 0.3)",
   },
 
   searchBar: {
     display: "flex",
-    gap: 12,
+    gap: "12px",
     alignItems: "center",
     background: "#fff",
-    padding: 14,
-    borderRadius: 12,
+    padding: "14px",
+    borderRadius: "12px",
     boxShadow: "0 20px 50px rgba(10,20,40,0.12)",
     flexWrap: "wrap",
+    position: "relative",
   },
 
   searchItem: {
     display: "flex",
     alignItems: "center",
-    gap: 8,
-    padding: "8px 12px",
+    gap: "8px",
+    padding: "10px 16px",
     background: "#f6f8fb",
-    borderRadius: 999,
-    minWidth: 150,
+    borderRadius: "999px",
+    minWidth: "150px",
+    flex: 1,
   },
 
   icon: {
-    fontSize: 18,
-    marginRight: 6,
+    fontSize: "18px",
+    marginRight: "6px",
+    color: "#667eea",
   },
 
   select: {
     border: "none",
     outline: "none",
     background: "transparent",
-    fontSize: 15,
+    fontSize: "15px",
     width: "100%",
     cursor: "pointer",
+    color: "#333",
+    fontFamily: "inherit",
   },
 
   searchInputWrap: {
-    flex: 1,
-    minWidth: 180,
+    flex: 2,
+    minWidth: "180px",
     display: "flex",
+    position: "relative",
   },
 
   searchInput: {
     width: "100%",
-    padding: "10px 16px",
-    borderRadius: 999,
+    padding: "12px 16px",
+    borderRadius: "999px",
     border: "1px solid #e6e9ef",
     outline: "none",
-    fontSize: 15,
+    fontSize: "15px",
+    fontFamily: "inherit",
+    "&:focus": {
+      borderColor: "#667eea",
+      boxShadow: "0 0 0 3px rgba(102, 126, 234, 0.1)",
+    },
+  },
+
+  clearSearchBtn: {
+    position: "absolute",
+    right: "12px",
+    top: "50%",
+    transform: "translateY(-50%)",
+    background: "transparent",
+    border: "none",
+    color: "#999",
+    cursor: "pointer",
+    fontSize: "18px",
+    padding: "4px",
+    "&:hover": {
+      color: "#333",
+    },
   },
 
   searchBtn: {
-    background: "#0b5fff",
+    background: "#667eea",
     color: "#fff",
     border: "none",
-    padding: "10px 18px",
-    borderRadius: 999,
+    padding: "12px 24px",
+    borderRadius: "999px",
     fontWeight: 700,
     cursor: "pointer",
     transition: "background 0.2s, transform 0.2s",
     width: "100%",
+    fontSize: "15px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "8px",
     "&:hover": {
-      background: "#094ccc",
+      background: "#5a6fd8",
       transform: "translateY(-1px)",
     },
   },
 
+  clearBtn: {
+    background: "#f6f8fb",
+    color: "#667eea",
+    border: "1px solid #667eea",
+    padding: "12px 16px",
+    borderRadius: "999px",
+    fontWeight: 600,
+    cursor: "pointer",
+    transition: "all 0.2s",
+    fontSize: "14px",
+    minWidth: "80px",
+    "&:hover": {
+      background: "#667eea",
+      color: "#fff",
+    },
+  },
+
   suggestionBox: {
-    marginTop: 10,
+    marginTop: "10px",
     background: "#fff",
-    borderRadius: 8,
+    borderRadius: "12px",
     boxShadow: "0 6px 24px rgba(0,0,0,0.12)",
-    padding: 8,
-    maxHeight: 300,
+    maxHeight: "300px",
     overflowY: "auto",
     position: "relative",
     zIndex: 50,
+    animation: "fadeInUp 0.2s ease-out",
+  },
+
+  suggestionHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "12px 16px",
+    borderBottom: "1px solid #f0f0f0",
+    fontSize: "14px",
+    color: "#666",
   },
 
   suggestionItem: {
-    padding: 10,
-    borderRadius: 6,
+    padding: "12px 16px",
+    borderRadius: "6px",
     cursor: "pointer",
-    marginBottom: 6,
+    marginBottom: "2px",
     background: "#fff",
     transition: "background 0.2s",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
     "&:hover": {
       background: "#f0f4ff",
     },
   },
 
+  suggestionType: {
+    fontSize: "12px",
+    color: "#888",
+    background: "#f5f5f5",
+    padding: "2px 6px",
+    borderRadius: "4px",
+  },
+
+  suggestionArrow: {
+    color: "#667eea",
+    fontSize: "18px",
+    opacity: 0.5,
+  },
+
+  /* ----- Property Types Section ----- */
+  propertyTypesSection: {
+    marginBottom: "60px",
+    animation: "fadeInUp 0.6s ease-out",
+  },
+
+  propertyTypesGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+    gap: "20px",
+    marginTop: "30px",
+  },
+
+  propertyTypeCard: {
+    background: "#fff",
+    borderRadius: "16px",
+    padding: "24px 20px",
+    textAlign: "center",
+    cursor: "pointer",
+    transition: "all 0.3s ease",
+    boxShadow: "0 10px 30px rgba(10,20,40,0.06)",
+    position: "relative",
+    "&:hover": {
+      boxShadow: "0 20px 40px rgba(10,20,40,0.12)",
+    },
+  },
+
+  propertyTypeIcon: {
+    fontSize: "48px",
+    marginBottom: "16px",
+  },
+
+  propertyTypeTitle: {
+    fontSize: "18px",
+    fontWeight: 700,
+    color: "#1a1a1a",
+    margin: "0 0 8px 0",
+  },
+
+  propertyTypeCount: {
+    fontSize: "14px",
+    color: "#666",
+    margin: 0,
+  },
+
+  selectedBadge: {
+    position: "absolute",
+    top: "12px",
+    right: "12px",
+    background: "#667eea",
+    color: "#fff",
+    fontSize: "10px",
+    fontWeight: 600,
+    padding: "4px 8px",
+    borderRadius: "12px",
+  },
+
   /* ----- Services Section ----- */
   servicesSection: {
-    marginTop: 80,
-    marginBottom: 60,
-    position: "relative",
+    marginBottom: "80px",
+    animation: "fadeInUp 0.6s ease-out",
+  },
+
+  sectionHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    marginBottom: "30px",
   },
 
   sectionTitle: {
-    fontSize: 32,
-    marginBottom: 12,
+    fontSize: "32px",
+    marginBottom: "8px",
     fontWeight: 800,
     color: "#1a1a1a",
-    textAlign: "center",
   },
 
   sectionSubtitle: {
-    fontSize: 16,
+    fontSize: "16px",
     color: "#666",
-    textAlign: "center",
-    marginBottom: 40,
-    maxWidth: 600,
-    marginLeft: "auto",
-    marginRight: "auto",
+    maxWidth: "600px",
+  },
+
+  viewAllBtn: {
+    padding: "10px 20px",
+    background: "transparent",
+    border: "2px solid #667eea",
+    color: "#667eea",
+    borderRadius: "8px",
+    fontSize: "14px",
+    fontWeight: 600,
+    cursor: "pointer",
+    transition: "all 0.2s",
+    "&:hover": {
+      background: "#667eea",
+      color: "#fff",
+    },
   },
 
   servicesRow: {
     display: "flex",
-    gap: 25,
+    gap: "25px",
     overflowX: "auto",
     padding: "20px 0",
     scrollbarWidth: "none",
@@ -1136,23 +1806,18 @@ const styles = {
   },
 
   serviceCard: {
-    minWidth: 320,
+    minWidth: "320px",
     background: "#fff",
-    borderRadius: 16,
+    borderRadius: "16px",
     overflow: "hidden",
     boxShadow: "0 10px 40px rgba(0,0,0,0.08)",
     display: "flex",
     flexDirection: "column",
     flexShrink: 0,
-    transition: "transform 0.3s, box-shadow 0.3s",
-    "&:hover": {
-      transform: "translateY(-8px)",
-      boxShadow: "0 20px 50px rgba(0,0,0,0.15)",
-    },
   },
 
   serviceImage: {
-    height: 200,
+    height: "200px",
     width: "100%",
     overflow: "hidden",
     position: "relative",
@@ -1160,27 +1825,27 @@ const styles = {
 
   serviceTypeBadge: {
     position: "absolute",
-    top: 15,
-    right: 15,
+    top: "15px",
+    right: "15px",
     background: "rgba(0,0,0,0.7)",
     color: "#fff",
     padding: "6px 12px",
-    borderRadius: 20,
-    fontSize: 12,
+    borderRadius: "20px",
+    fontSize: "12px",
     fontWeight: 600,
     backdropFilter: "blur(4px)",
   },
 
   serviceContent: {
-    padding: 20,
+    padding: "20px",
     display: "flex",
     flexDirection: "column",
-    gap: 12,
+    gap: "12px",
     flex: 1,
   },
 
   serviceTitle: {
-    fontSize: 20,
+    fontSize: "20px",
     fontWeight: 700,
     color: "#1a1a1a",
     margin: 0,
@@ -1188,7 +1853,7 @@ const styles = {
   },
 
   serviceDescription: {
-    fontSize: 14,
+    fontSize: "14px",
     color: "#666",
     lineHeight: 1.5,
     margin: 0,
@@ -1198,204 +1863,500 @@ const styles = {
   serviceDetails: {
     display: "flex",
     flexDirection: "column",
-    gap: 8,
-    marginTop: 8,
+    gap: "8px",
+    marginTop: "8px",
   },
 
   serviceDetailItem: {
     display: "flex",
     alignItems: "center",
-    gap: 8,
-    fontSize: 14,
+    gap: "8px",
+    fontSize: "14px",
     color: "#555",
   },
 
   detailIcon: {
-    fontSize: 16,
+    fontSize: "16px",
     opacity: 0.7,
   },
 
   servicesList: {
-    fontSize: 13,
+    fontSize: "13px",
     color: "#666",
     lineHeight: 1.4,
   },
 
   serviceButton: {
-    marginTop: 12,
+    marginTop: "12px",
     padding: "12px 20px",
-    background: "linear-gradient(90deg, #0b5fff, #0066ff)",
+    background: "linear-gradient(90deg, #667eea, #764ba2)",
     color: "#fff",
     border: "none",
-    borderRadius: 8,
+    borderRadius: "8px",
     cursor: "pointer",
     fontWeight: 600,
-    fontSize: 15,
+    fontSize: "15px",
     transition: "all 0.2s",
     "&:hover": {
-      background: "linear-gradient(90deg, #094ccc, #0052cc)",
       transform: "translateY(-2px)",
-      boxShadow: "0 5px 15px rgba(11, 95, 255, 0.3)",
+      boxShadow: "0 5px 15px rgba(102, 126, 234, 0.3)",
     },
   },
 
   /* ----- Properties Section ----- */
   propertiesSection: {
-    marginTop: 60,
-    paddingTop: 40,
-    borderTop: "1px solid #e6e9ef",
-  },
-
-  sectionHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 20,
+    marginBottom: "80px",
+    animation: "fadeInUp 0.6s ease-out",
   },
 
   filterSummary: {
-    background: "#fff",
-    padding: "14px 20px",
-    borderRadius: 12,
-    marginBottom: 30,
+    fontSize: "15px",
     color: "#555",
-    fontSize: 15,
-    boxShadow: "0 2px 8px rgba(0,0,0,0.05)",
+    marginTop: "8px",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    flexWrap: "wrap",
+  },
+
+  filterTag: {
+    background: "#f0f4ff",
+    color: "#667eea",
+    padding: "4px 12px",
+    borderRadius: "20px",
+    fontSize: "13px",
+    fontWeight: 500,
+  },
+
+  filterActions: {
+    display: "flex",
+    gap: "12px",
+    alignItems: "center",
   },
 
   clearFilterBtn: {
-    padding: "8px 16px",
-    background: "#f0f4ff",
-    color: "#0b5fff",
-    border: "1px solid #0b5fff",
-    borderRadius: 6,
+    padding: "10px 20px",
+    background: "#f6f8fb",
+    color: "#667eea",
+    border: "1px solid #667eea",
+    borderRadius: "8px",
     cursor: "pointer",
     fontWeight: 600,
-    fontSize: 14,
+    fontSize: "14px",
+    transition: "all 0.2s",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    "&:hover": {
+      background: "#667eea",
+      color: "#fff",
+    },
+  },
+
+  mobileFilterBtn: {
+    display: "none",
+    padding: "10px 20px",
+    background: "#667eea",
+    color: "#fff",
+    border: "none",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontWeight: 600,
+    fontSize: "14px",
+  },
+
+  loadingGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+    gap: "28px",
+    marginTop: "30px",
+  },
+
+  loadingCard: {
+    background: "#fff",
+    borderRadius: "16px",
+    overflow: "hidden",
+    boxShadow: "0 10px 30px rgba(10,20,40,0.06)",
+  },
+
+  loadingImage: {
+    height: "200px",
+    width: "100%",
+    borderRadius: "16px 16px 0 0",
+  },
+
+  loadingContent: {
+    padding: "20px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "12px",
+  },
+
+  loadingTitle: {
+    height: "20px",
+    width: "80%",
+    borderRadius: "4px",
+  },
+
+  loadingMeta: {
+    height: "16px",
+    width: "60%",
+    borderRadius: "4px",
+  },
+
+  loadingPrice: {
+    height: "24px",
+    width: "40%",
+    borderRadius: "4px",
+  },
+
+  noResults: {
+    textAlign: "center",
+    padding: "80px 20px",
+    background: "#fff",
+    borderRadius: "16px",
+    boxShadow: "0 10px 30px rgba(10,20,40,0.06)",
+    marginTop: "30px",
+  },
+
+  noResultsIcon: {
+    fontSize: "64px",
+    marginBottom: "20px",
+    opacity: 0.5,
+  },
+
+  noResultsTitle: {
+    fontSize: "24px",
+    fontWeight: 700,
+    color: "#1a1a1a",
+    marginBottom: "12px",
+  },
+
+  noResultsText: {
+    fontSize: "16px",
+    color: "#666",
+    marginBottom: "24px",
+    maxWidth: "400px",
+    margin: "0 auto",
+  },
+
+  noResultsBtn: {
+    padding: "12px 32px",
+    background: "#667eea",
+    color: "#fff",
+    border: "none",
+    borderRadius: "8px",
+    fontSize: "16px",
+    fontWeight: 600,
+    cursor: "pointer",
     transition: "all 0.2s",
     "&:hover": {
-      background: "#0b5fff",
-      color: "#fff",
+      background: "#5a6fd8",
+      transform: "translateY(-2px)",
     },
   },
 
   grid: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-    gap: 28,
+    gap: "28px",
+    marginTop: "30px",
   },
 
   card: {
     background: "#fff",
-    borderRadius: 16,
+    borderRadius: "16px",
     overflow: "hidden",
     boxShadow: "0 10px 30px rgba(10,20,40,0.06)",
     display: "flex",
     flexDirection: "column",
-    minHeight: 340,
+    minHeight: "420px",
     cursor: "pointer",
-    transition: "transform 0.3s, box-shadow 0.3s",
-    "&:hover": {
-      transform: "translateY(-8px)",
-      boxShadow: "0 20px 50px rgba(10,20,40,0.12)",
-    },
   },
 
   cardImage: {
-    height: 200,
+    height: "220px",
     width: "100%",
     overflow: "hidden",
     position: "relative",
   },
 
+  propertyImage: {
+    width: "100%",
+    height: "100%",
+    overflow: "hidden",
+    transition: "transform 0.5s ease",
+  },
+
   listingBadge: {
     position: "absolute",
-    top: 15,
-    right: 15,
+    top: "15px",
+    left: "15px",
     background: "rgba(0,0,0,0.7)",
     color: "#fff",
     padding: "6px 12px",
-    borderRadius: 6,
-    fontSize: 12,
+    borderRadius: "6px",
+    fontSize: "12px",
     fontWeight: 600,
     backdropFilter: "blur(4px)",
   },
 
+  verifiedBadge: {
+    position: "absolute",
+    top: "15px",
+    right: "15px",
+    background: "#4caf50",
+    color: "#fff",
+    padding: "6px 12px",
+    borderRadius: "20px",
+    fontSize: "12px",
+    fontWeight: 600,
+    backdropFilter: "blur(4px)",
+  },
+
+  imageOverlay: {
+    position: "absolute",
+    inset: 0,
+    background: "linear-gradient(transparent, rgba(0,0,0,0.7))",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "#fff",
+    fontSize: "16px",
+    fontWeight: 600,
+    opacity: 0,
+    transition: "opacity 0.3s ease",
+  },
+
   cardBody: {
-    padding: 20,
+    padding: "20px",
     display: "flex",
     flexDirection: "column",
-    gap: 14,
+    gap: "16px",
     flex: 1,
   },
 
+  cardHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: "12px",
+  },
+
   cardTitle: {
-    fontSize: 18,
+    fontSize: "18px",
     fontWeight: 700,
     color: "#1a1a1a",
     margin: 0,
     lineHeight: 1.4,
+    flex: 1,
+  },
+
+  cardRating: {
+    background: "#ffd700",
+    color: "#333",
+    padding: "4px 8px",
+    borderRadius: "4px",
+    fontSize: "12px",
+    fontWeight: 600,
+    display: "flex",
+    alignItems: "center",
+    gap: "4px",
   },
 
   metaRow: {
     display: "flex",
-    gap: 8,
+    gap: "12px",
     flexWrap: "wrap",
   },
 
   meta: {
-    background: "#f4f6f8",
-    padding: "8px 12px",
-    borderRadius: 8,
-    fontSize: 13,
-    color: "#555",
     display: "flex",
     alignItems: "center",
-    gap: 6,
+    gap: "6px",
+    fontSize: "14px",
+    color: "#666",
   },
 
   metaIcon: {
-    fontSize: 14,
+    fontSize: "14px",
     opacity: 0.7,
   },
 
-  price: {
+  metaText: {
+    fontSize: "13px",
+  },
+
+  propertyTypeTag: {
+    background: "#f0f4ff",
+    color: "#667eea",
+    padding: "6px 12px",
+    borderRadius: "20px",
+    fontSize: "12px",
+    fontWeight: 600,
+    alignSelf: "flex-start",
+  },
+
+  cardDescription: {
+    fontSize: "14px",
+    color: "#666",
+    lineHeight: 1.5,
+    margin: 0,
+    flex: 1,
+  },
+
+  cardFooter: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
     marginTop: "auto",
+    paddingTop: "16px",
+    borderTop: "1px solid #f0f0f0",
+  },
+
+  price: {
+    display: "flex",
+    flexDirection: "column",
+  },
+
+  priceLabel: {
+    fontSize: "12px",
+    color: "#999",
+    marginBottom: "2px",
+  },
+
+  priceAmount: {
     color: "#d32f2f",
     fontWeight: 800,
-    fontSize: 22,
+    fontSize: "20px",
   },
 
   rentPeriod: {
-    fontSize: 14,
+    fontSize: "14px",
     fontWeight: 400,
     color: "#777",
-    marginLeft: 4,
+    marginLeft: "4px",
   },
 
   detailBtn: {
-    marginTop: 10,
-    borderRadius: 8,
-    padding: "12px 16px",
-    background: "#0b5fff",
+    padding: "10px 20px",
+    background: "#667eea",
     color: "#fff",
     border: "none",
+    borderRadius: "8px",
     cursor: "pointer",
     fontWeight: 600,
-    fontSize: 15,
+    fontSize: "14px",
     transition: "all 0.2s",
-    textAlign: "center",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
     "&:hover": {
-      background: "#094ccc",
+      background: "#5a6fd8",
+      transform: "translateY(-2px)",
     },
   },
 
-  noResults: {
-    gridColumn: "1 / -1",
+  /* ----- Stats Section ----- */
+  statsSection: {
+    marginBottom: "80px",
+    animation: "fadeInUp 0.6s ease-out",
+  },
+
+  statsGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+    gap: "25px",
+    marginTop: "40px",
+  },
+
+  statCard: {
+    background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+    color: "#fff",
+    padding: "30px 20px",
+    borderRadius: "16px",
     textAlign: "center",
-    padding: "60px 20px",
+    boxShadow: "0 15px 40px rgba(102, 126, 234, 0.3)",
+    transition: "transform 0.3s ease",
+    "&:hover": {
+      transform: "translateY(-10px)",
+    },
+  },
+
+  statIcon: {
+    fontSize: "48px",
+    marginBottom: "16px",
+    opacity: 0.9,
+  },
+
+  statNumber: {
+    fontSize: "36px",
+    fontWeight: 800,
+    marginBottom: "8px",
+  },
+
+  statLabel: {
+    fontSize: "16px",
+    opacity: 0.9,
+  },
+
+  /* ----- Mobile Filters Modal ----- */
+  mobileFiltersModal: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.5)",
+    zIndex: 1000,
+    display: "flex",
+    alignItems: "flex-end",
+  },
+
+  mobileFiltersContent: {
     background: "#fff",
-    borderRadius: 12,
-    boxShadow: "0 5px 20px rgba(0,0,0,0.05)",
+    width: "100%",
+    maxHeight: "80vh",
+    borderTopLeftRadius: "20px",
+    borderTopRightRadius: "20px",
+    padding: "20px",
+    overflow: "auto",
+  },
+
+  mobileFiltersHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: "20px",
+  },
+
+  mobileFiltersBody: {
+    marginBottom: "20px",
+  },
+
+  mobileFiltersFooter: {
+    display: "flex",
+    gap: "12px",
+  },
+
+  applyFiltersBtn: {
+    flex: 1,
+    padding: "14px",
+    background: "#667eea",
+    color: "#fff",
+    border: "none",
+    borderRadius: "8px",
+    fontWeight: 600,
+    fontSize: "16px",
+    cursor: "pointer",
+  },
+
+  resetFiltersBtn: {
+    flex: 1,
+    padding: "14px",
+    background: "#f6f8fb",
+    color: "#667eea",
+    border: "1px solid #667eea",
+    borderRadius: "8px",
+    fontWeight: 600,
+    fontSize: "16px",
+    cursor: "pointer",
   },
 };

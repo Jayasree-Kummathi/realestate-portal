@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { fixMediaUrl } from "../utils/fixMediaUrl";
 import api from "../api/api";
 
 export default function PropertyDetails() {
@@ -7,8 +8,9 @@ export default function PropertyDetails() {
   const navigate = useNavigate();
 
   const [property, setProperty] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [related, setRelated] = useState([]);
-  const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
+  const [error, setError] = useState("");
 
   // Main image + lightbox
   const [mainImage, setMainImage] = useState(null);
@@ -17,11 +19,24 @@ export default function PropertyDetails() {
 
   // Enquiry form
   const [submitMsg, setSubmitMsg] = useState("");
-  const [form, setForm] = useState({ name: "", email: "", phone: "", message: "" });
+  const [formSubmitting, setFormSubmitting] = useState(false);
+  const [form, setForm] = useState({ 
+    name: "", 
+    email: "", 
+    phone: "", 
+    message: "",
+    propertyId: id 
+  });
 
   // 360 viewer state
   const [panoramaUrl, setPanoramaUrl] = useState(null);
-  const panRef = useRef({ dragging: false, startX: 0, offset: 50 }); // offset 0..100 = background-position-x percent
+  const [panoramaLoaded, setPanoramaLoaded] = useState(false);
+  const panRef = useRef({ 
+    dragging: false, 
+    startX: 0, 
+    offset: 50,
+    isTouch: false 
+  });
   const panElRef = useRef(null);
 
   // EMI calculator state
@@ -31,84 +46,149 @@ export default function PropertyDetails() {
     interestAnnual: 8.5,
     tenureYears: 10,
   });
-  const [emiResult, setEmiResult] = useState({ emi: 0, totalPayment: 0, totalInterest: 0, schedule: [] });
+  const [emiResult, setEmiResult] = useState({ 
+    emi: 0, 
+    totalPayment: 0, 
+    totalInterest: 0, 
+    schedule: [],
+    loanAmount: 0 
+  });
 
+  // Load property data
   useEffect(() => {
-    async function load() {
+    async function loadProperty() {
       try {
+        setLoading(true);
+        setError("");
         const res = await api.get(`/properties/${id}`);
         const p = res.data;
         setProperty(p);
 
+        // Set main image
         if (p.images?.length > 0) {
-          setMainImage(`${BASE_URL}${p.images[0]}`);
+          const firstImage = fixMediaUrl(p.images[0]);
+          setMainImage(firstImage);
         }
 
-        // detect panorama image heuristically:
-        // prefer explicit `p.panorama` field, else check filenames containing '360' or 'panorama'
+        // Detect panorama image
         if (p.panorama) {
-          setPanoramaUrl(p.panorama.startsWith("http") ? p.panorama : `${BASE_URL}${p.panorama}`);
-        } else {
-          const found = (p.images || []).find((u) => /360|panorama|pano/i.test(u));
-          if (found) setPanoramaUrl(`${BASE_URL}${found}`);
+          setPanoramaUrl(fixMediaUrl(p.panorama));
+        } else if (p.images?.length) {
+          const found = p.images.find((u) => 
+            /360|panorama|pano/i.test(u) || 
+            /360|panorama|pano/i.test(p.title || "")
+          );
+          if (found) setPanoramaUrl(fixMediaUrl(found));
         }
 
-        loadRelated(p.city, p.areaName, p._id);
-        // set default EMI inputs
-        setLoanInputs((li) => ({ ...li, price: Number(p.price || 0) }));
+        // Set EMI calculator with property price
+        if (p.price) {
+          setLoanInputs(prev => ({ 
+            ...prev, 
+            price: Number(p.price) || 0 
+          }));
+        }
+
+        // Load related properties
+        await loadRelated(p.city, p.areaName, p._id);
+        
       } catch (err) {
         console.error("Error loading property:", err);
+        setError("Failed to load property details. Please try again.");
+      } finally {
+        setLoading(false);
       }
     }
-    load();
+    
+    loadProperty();
   }, [id]);
 
-  async function loadRelated(city, areaName, currentId) {
+  // Load related properties
+  const loadRelated = async (city, areaName, currentId) => {
     try {
-      const res = await api.get("/properties");
+      const res = await api.get("/properties", {
+        params: {
+          limit: 8,
+          exclude: currentId,
+          city: city,
+          area: areaName
+        }
+      });
+      
       const data = res.data || [];
-      const matches = data.filter(
-        (p) =>
-          p._id !== currentId &&
-          (p.city?.toLowerCase() === city?.toLowerCase() ||
-            p.areaName?.toLowerCase() === areaName?.toLowerCase())
+      const matches = data.filter(p => 
+        p._id !== currentId &&
+        (p.city?.toLowerCase() === city?.toLowerCase() ||
+         p.areaName?.toLowerCase() === areaName?.toLowerCase())
       );
       setRelated(matches.slice(0, 8));
     } catch (err) {
       console.error("Related properties error:", err);
+      setRelated([]);
     }
-  }
+  };
 
   /* ---------------- Lightbox controls ---------------- */
   const openLightbox = (index) => {
     setLightboxIndex(index);
     setLightboxOpen(true);
+    document.body.style.overflow = "hidden"; // Prevent scrolling
   };
-  const closeLightbox = () => setLightboxOpen(false);
+
+  const closeLightbox = () => {
+    setLightboxOpen(false);
+    document.body.style.overflow = "auto";
+  };
+
   const nextImage = () => {
     if (!property?.images) return;
     setLightboxIndex((prev) => (prev + 1) % property.images.length);
   };
+
   const prevImage = () => {
     if (!property?.images) return;
-    setLightboxIndex((prev) => (prev === 0 ? property.images.length - 1 : prev - 1));
+    setLightboxIndex((prev) => 
+      prev === 0 ? property.images.length - 1 : prev - 1
+    );
   };
 
   /* ---------------- Enquiry submit ---------------- */
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSubmitMsg("");
+    setFormSubmitting(true);
+
+    // Basic validation
+    if (!form.name.trim() || !form.email.trim() || !form.phone.trim()) {
+      setSubmitMsg("❌ Please fill in all required fields");
+      setFormSubmitting(false);
+      return;
+    }
+
     try {
       await api.post("/enquiries", {
         propertyId: property._id,
         agentId: property.agent?._id,
+        propertyTitle: property.title,
         ...form,
       });
-      setSubmitMsg("✅ Enquiry submitted successfully!");
-      setForm({ name: "", email: "", phone: "", message: "" });
+      
+      setSubmitMsg("✅ Enquiry submitted successfully! We'll contact you soon.");
+      setForm({ 
+        name: "", 
+        email: "", 
+        phone: "", 
+        message: "",
+        propertyId: id 
+      });
+      
+      // Clear success message after 5 seconds
+      setTimeout(() => setSubmitMsg(""), 5000);
     } catch (err) {
-      console.error(err);
-      setSubmitMsg("❌ Failed to submit enquiry");
+      console.error("Enquiry submission error:", err);
+      setSubmitMsg("❌ Failed to submit enquiry. Please try again.");
+    } finally {
+      setFormSubmitting(false);
     }
   };
 
@@ -116,78 +196,97 @@ export default function PropertyDetails() {
   const onPanStart = (e) => {
     e.preventDefault();
     panRef.current.dragging = true;
-    panRef.current.startX = e.type.startsWith("touch") ? e.touches[0].clientX : e.clientX;
-  };
-  const onPanMove = (e) => {
-    if (!panRef.current.dragging) return;
-    const clientX = e.type.startsWith("touch") ? e.touches[0].clientX : e.clientX;
-    const dx = clientX - panRef.current.startX;
-    // translate dx into percent change; sensitivity factor:
-    const width = panElRef.current?.offsetWidth || window.innerWidth;
-    const deltaPercent = (dx / width) * 100 * 1.2;
-    let newOffset = panRef.current.offset + deltaPercent;
-    // wrap-around between 0 and 100
-    newOffset = ((newOffset % 100) + 100) % 100;
+    panRef.current.isTouch = e.type.startsWith("touch");
+    const clientX = panRef.current.isTouch ? e.touches[0].clientX : e.clientX;
     panRef.current.startX = clientX;
-    panRef.current.offset = newOffset;
+    
     if (panElRef.current) {
-      panElRef.current.style.backgroundPosition = `${panRef.current.offset}% 50%`;
+      panElRef.current.style.cursor = "grabbing";
     }
   };
+
+  const onPanMove = (e) => {
+    if (!panRef.current.dragging || !panElRef.current) return;
+    
+    const clientX = panRef.current.isTouch ? e.touches[0].clientX : e.clientX;
+    const dx = clientX - panRef.current.startX;
+    const width = panElRef.current.offsetWidth;
+    const deltaPercent = (dx / width) * 100 * 1.5; // Sensitivity factor
+    
+    let newOffset = panRef.current.offset + deltaPercent;
+    // Keep between 0 and 100
+    newOffset = ((newOffset % 100) + 100) % 100;
+    
+    panRef.current.startX = clientX;
+    panRef.current.offset = newOffset;
+    
+    panElRef.current.style.backgroundPosition = `${newOffset}% 50%`;
+  };
+
   const onPanEnd = () => {
     panRef.current.dragging = false;
+    if (panElRef.current) {
+      panElRef.current.style.cursor = "grab";
+    }
   };
 
   /* ---------------- EMI Calculator ---------------- */
   useEffect(() => {
     computeEmi();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loanInputs]);
 
   function computeEmi() {
     const P_full = Number(loanInputs.price) || 0;
     const downPercent = Number(loanInputs.downPercent) || 0;
-    const principal = P_full * (1 - downPercent / 100);
+    const loanAmount = P_full * (1 - downPercent / 100);
     const annualRate = Number(loanInputs.interestAnnual) || 0;
     const monthlyRate = annualRate / 12 / 100;
     const n = Number(loanInputs.tenureYears) * 12 || 1;
 
-    if (monthlyRate === 0) {
-      const emi = principal / n;
+    if (loanAmount <= 0) {
       setEmiResult({
-        emi,
-        totalPayment: emi * n,
-        totalInterest: emi * n - principal,
-        schedule: buildSchedule(principal, monthlyRate, n, emi),
+        emi: 0,
+        totalPayment: 0,
+        totalInterest: 0,
+        loanAmount: 0,
+        schedule: []
       });
       return;
     }
 
-    const pow = Math.pow(1 + monthlyRate, n);
-    const emi = principal * monthlyRate * pow / (pow - 1);
+    let emi = 0;
+    if (monthlyRate === 0) {
+      emi = loanAmount / n;
+    } else {
+      const pow = Math.pow(1 + monthlyRate, n);
+      emi = (loanAmount * monthlyRate * pow) / (pow - 1);
+    }
+
     const totalPayment = emi * n;
-    const totalInterest = totalPayment - principal;
+    const totalInterest = totalPayment - loanAmount;
 
     setEmiResult({
       emi,
       totalPayment,
       totalInterest,
-      schedule: buildSchedule(principal, monthlyRate, n, emi),
+      loanAmount,
+      schedule: buildSchedule(loanAmount, monthlyRate, n, emi),
     });
   }
 
   function buildSchedule(principal, monthlyRate, n, emi) {
     const sch = [];
     let bal = principal;
-    for (let i = 1; i <= Math.min(n, 12); i++) { // only show up to first 12 rows for preview
+    for (let i = 1; i <= Math.min(n, 6); i++) { // Show first 6 months
       const interest = bal * monthlyRate;
       const principalRepay = emi - interest;
-      bal = bal - principalRepay;
+      bal = Math.max(bal - principalRepay, 0);
       sch.push({
         month: i,
         interest,
         principalRepay,
-        balance: Math.max(bal, 0),
+        balance: bal,
+        emi: emi
       });
     }
     return sch;
@@ -198,100 +297,211 @@ export default function PropertyDetails() {
     const coords = property?.location?.coordinates;
     if (coords && coords.length >= 2) {
       const [lng, lat] = coords;
-      return `https://www.google.com/maps?q=${lat},${lng}&z=15&output=embed`;
+      return `https://www.google.com/maps/embed/v1/view?key=${import.meta.env.VITE_GOOGLE_MAPS_KEY || 'AIzaSyB5qkKn8Dc_Y8m4U2r6M33iBw96vzZ2N_A'}&center=${lat},${lng}&zoom=15&maptype=roadmap`;
     }
-    const q = encodeURIComponent(property.address || property.areaName || property.title);
-    return `https://www.google.com/maps?q=${q}&z=15&output=embed`;
+    const q = encodeURIComponent(property?.address || property?.areaName || property?.title || "");
+    return `https://www.google.com/maps/embed/v1/place?key=${import.meta.env.VITE_GOOGLE_MAPS_KEY || 'AIzaSyB5qkKn8Dc_Y8m4U2r6M33iBw96vzZ2N_A'}&q=${q}&zoom=15`;
   };
 
-  if (!property) return <p style={{ textAlign: "center", padding: 30 }}>Loading...</p>;
+  // Format currency
+  const formatCurrency = (amount) => {
+    return new Intl.NumberFormat('en-IN', {
+      maximumFractionDigits: 0
+    }).format(Math.round(amount || 0));
+  };
+
+  if (loading) {
+    return (
+      <div style={styles.loadingContainer}>
+        <div style={styles.spinner}></div>
+        <p>Loading property details...</p>
+      </div>
+    );
+  }
+
+  if (error || !property) {
+    return (
+      <div style={styles.errorContainer}>
+        <h2>⚠️ {error || "Property not found"}</h2>
+        <button 
+          onClick={() => navigate(-1)} 
+          style={styles.backButton}
+        >
+          ← Go Back
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div style={styles.page}>
       <style>{`
-        @keyframes fadeIn { from { opacity: 0; transform: scale(0.98);} to {opacity:1; transform:scale(1);} }
-        @keyframes slide { from { opacity: 0; transform: translateY(10px);} to {opacity:1; transform:translateY(0);} }
-        @media (max-width: 900px) {
-          .pdLayout { flex-direction: column; }
-          .pdRight { position: static; width: 100%; }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes slideIn {
+          from { opacity: 0; transform: translateX(-10px); }
+          to { opacity: 1; transform: translateX(0); }
+        }
+        
+        @media (max-width: 768px) {
+          .pdLayout {
+            flex-direction: column;
+          }
+          .pdRight {
+            position: static;
+            width: 100%;
+            margin-top: 20px;
+          }
+          .emiResult {
+            flex-direction: column;
+            gap: 10px;
+          }
         }
       `}</style>
 
+      {/* Back button */}
+      <button 
+        onClick={() => navigate(-1)} 
+        style={styles.backButton}
+      >
+        ← Back to Properties
+      </button>
+
       {/* MAIN IMAGE PREVIEW */}
-      <div style={styles.mainImageWrap} onClick={() => openLightbox(0)}>
-        <img src={mainImage} style={styles.mainImage} alt="main" />
+      <div 
+        style={styles.mainImageWrap} 
+        onClick={() => openLightbox(0)}
+        title="Click to view fullscreen"
+      >
+        <img 
+          src={mainImage || "/placeholder-property.jpg"} 
+          style={styles.mainImage} 
+          alt={property.title}
+          onError={(e) => {
+            e.target.src = "/placeholder-property.jpg";
+          }}
+        />
+        <div style={styles.imageOverlay}>
+          <span>Click to view fullscreen</span>
+        </div>
       </div>
 
       <div className="pdLayout" style={styles.layout}>
-        {/* LEFT */}
+        {/* LEFT COLUMN */}
         <div style={styles.left}>
+          {/* Title and Price */}
           <h1 style={styles.title}>{property.title}</h1>
-
+          
           <div style={styles.priceRow}>
-            <span style={styles.price}>₹ {property.price?.toLocaleString("en-IN")}</span>
+            <span style={styles.price}>₹ {formatCurrency(property.price)}</span>
+            {property.pricePerSqFt && (
+              <span style={styles.pricePerSqFt}>
+                (₹{formatCurrency(property.pricePerSqFt)}/sq.ft)
+              </span>
+            )}
+          </div>
+          
+          <div style={styles.locationRow}>
             <span style={styles.location}>📍 {property.address || property.areaName}</span>
+            {property.city && (
+              <span style={styles.city}>{property.city}</span>
+            )}
           </div>
 
           <hr style={styles.divider} />
 
           {/* PHOTOS GALLERY */}
-          <h3 style={styles.sectionTitle}>Photos</h3>
+          <h3 style={styles.sectionTitle}>Photos ({property.images?.length || 0})</h3>
           <div style={styles.galleryRow}>
             {property.images?.map((img, i) => (
-              <img
-                key={i}
-                src={`${BASE_URL}${img}`}
-                style={{ ...styles.thumb, border: mainImage?.includes(img) ? "2px solid #ff9800" : "2px solid transparent" }}
-                onClick={() => { setMainImage(`${BASE_URL}${img}`); }}
-                onDoubleClick={() => openLightbox(i)}
-                alt={`thumb-${i}`}
-              />
+              <div key={i} style={styles.thumbContainer}>
+                <img
+                  src={fixMediaUrl(img)}
+                  style={{
+                    ...styles.thumb,
+                    border: mainImage?.includes(img) ? "3px solid #0066ff" : "3px solid transparent"
+                  }}
+                  onClick={() => setMainImage(fixMediaUrl(img))}
+                  onDoubleClick={() => openLightbox(i)}
+                  alt={`Property view ${i + 1}`}
+                  onError={(e) => {
+                    e.target.src = "/placeholder-property.jpg";
+                  }}
+                />
+                <div style={styles.thumbOverlay} onClick={() => openLightbox(i)}>
+                  <span>View</span>
+                </div>
+              </div>
             ))}
           </div>
 
           {/* 360 Virtual Tour */}
-          <div style={{ marginTop: 18 }}>
-            <h3 style={styles.sectionTitle}>360° Virtual Tour</h3>
+          <div style={{ marginTop: 24 }}>
+            <h3 style={styles.sectionTitle}>
+              360° Virtual Tour
+              {panoramaUrl && (
+                <span style={styles.badge}>Interactive</span>
+              )}
+            </h3>
+            
             {panoramaUrl ? (
-              <div
-                ref={panElRef}
-                style={{
-                  ...styles.panorama,
-                  backgroundImage: `url("${panoramaUrl}")`,
-                  backgroundPosition: `${panRef.current.offset}% 50%`,
-                }}
-                onMouseDown={onPanStart}
-                onMouseMove={onPanMove}
-                onMouseUp={onPanEnd}
-                onMouseLeave={onPanEnd}
-                onTouchStart={onPanStart}
-                onTouchMove={onPanMove}
-                onTouchEnd={onPanEnd}
-                title="Drag to rotate / Double-click to open fullscreen"
-                onDoubleClick={() => {
-                  // open panorama in lightbox (if panorama is in images list try to find index else open separate overlay)
-                  const idx = (property.images || []).findIndex((u) => u.includes('360') || u.includes('panorama') || panoramaUrl.includes(u));
-                  if (idx >= 0) openLightbox(idx);
-                  else {
-                    // open a fullscreen view of panorama URL
-                    setMainImage(panoramaUrl);
-                    openLightbox(0);
-                  }
-                }}
-              >
-                <div style={styles.panoramaHint}>Drag to rotate • Double-click to open</div>
+              <div style={styles.panoramaContainer}>
+                <div
+                  ref={panElRef}
+                  style={{
+                    ...styles.panorama,
+                    backgroundImage: `url("${panoramaUrl}")`,
+                    backgroundPosition: `${panRef.current.offset}% 50%`,
+                    opacity: panoramaLoaded ? 1 : 0.5
+                  }}
+                  onMouseDown={onPanStart}
+                  onMouseMove={onPanMove}
+                  onMouseUp={onPanEnd}
+                  onMouseLeave={onPanEnd}
+                  onTouchStart={onPanStart}
+                  onTouchMove={onPanMove}
+                  onTouchEnd={onPanEnd}
+                  title="Drag to rotate • Double-click to open fullscreen"
+                  onDoubleClick={() => {
+                    const idx = property.images?.findIndex(img => 
+                      panoramaUrl.includes(img) || img.includes('360') || img.includes('panorama')
+                    );
+                    if (idx >= 0) openLightbox(idx);
+                  }}
+                >
+                  {!panoramaLoaded && (
+                    <div style={styles.loadingOverlay}>
+                      <div style={styles.miniSpinner}></div>
+                      <span>Loading panorama...</span>
+                    </div>
+                  )}
+                  <img
+                    src={panoramaUrl}
+                    style={{ display: 'none' }}
+                    onLoad={() => setPanoramaLoaded(true)}
+                    onError={() => setPanoramaLoaded(false)}
+                    alt=""
+                  />
+                  <div style={styles.panoramaHint}>
+                    <span>← Drag to rotate →</span>
+                    <br />
+                    <small>Double-click for fullscreen</small>
+                  </div>
+                </div>
               </div>
             ) : (
               <div style={styles.panoramaFallback}>
-                <p style={{ margin: 0 }}>No 360° tour available for this property.</p>
+                <p>No 360° virtual tour available for this property.</p>
                 <button
-                  style={styles.smallBtn}
+                  style={styles.secondaryButton}
                   onClick={() => {
-                    // open the first image fullscreen
                     if (property.images?.length) openLightbox(0);
                   }}
                 >
-                  View Photos
+                  View Photo Gallery
                 </button>
               </div>
             )}
@@ -300,55 +510,75 @@ export default function PropertyDetails() {
           <hr style={styles.divider} />
 
           {/* VIDEO TOUR */}
-{property.videoUrl && (
-  <>
-    <hr style={styles.divider} />
-
-    <h3 style={styles.sectionTitle}>Video Tour</h3>
-
-    <div style={styles.videoWrapper}>
-      <video
-        controls
-        playsInline
-        preload="metadata"
-        style={styles.video}
-      >
-        <source
-          src={`${BASE_URL}${property.videoUrl}`}
-          type="video/mp4"
-        />
-        Your browser does not support the video tag.
-      </video>
-    </div>
-  </>
-)}
-
+          {property.videoUrl && (
+            <>
+              <h3 style={styles.sectionTitle}>Video Tour</h3>
+              <div style={styles.videoWrapper}>
+                <video
+                  controls
+                  playsInline
+                  preload="metadata"
+                  style={styles.video}
+                  poster={mainImage}
+                >
+                  <source
+                    src={fixMediaUrl(property.videoUrl)}
+                    type="video/mp4"
+                  />
+                  Your browser does not support the video tag.
+                </video>
+              </div>
+              <hr style={styles.divider} />
+            </>
+          )}
 
           {/* MAP VIEW */}
-          <h3 style={styles.sectionTitle}>Location Map</h3>
+          <h3 style={styles.sectionTitle}>Location</h3>
           <div style={styles.mapWrap}>
             <iframe
               title="Property location"
               src={getMapSrc()}
               width="100%"
-              height="280"
-              style={{ border: 0, borderRadius: 12 }}
+              height="300"
+              style={styles.mapIframe}
               loading="lazy"
               referrerPolicy="no-referrer-when-downgrade"
+              allowFullScreen
             />
             <div style={styles.mapActionsRow}>
               <button
-                style={styles.smallBtn}
+                style={styles.secondaryButton}
                 onClick={() => {
-                  // open google maps in new tab with same query
                   const coords = property.location?.coordinates;
-                  const href = coords && coords.length >= 2
-                    ? `https://www.google.com/maps/search/?api=1&query=${coords[1]},${coords[0]}`
-                    : `https://www.google.com/maps/search/${encodeURIComponent(property.address || property.areaName || property.title)}`;
-                  window.open(href, "_blank");
+                  let href;
+                  if (coords && coords.length >= 2) {
+                    href = `https://www.google.com/maps/search/${encodeURIComponent(property.address || property.areaName || property.title)}`;
+                  } else {
+                    href = `https://www.google.com/maps/search/${encodeURIComponent(property.address || property.areaName || property.title)}`;
+                  }
+                  window.open(href, "_blank", "noopener,noreferrer");
                 }}
               >
                 Open in Google Maps
+              </button>
+              <button
+                style={styles.secondaryButton}
+                onClick={() => {
+                  // Share location
+                  const text = `Check out this property: ${property.title} at ${property.address}`;
+                  if (navigator.share) {
+                    navigator.share({
+                      title: property.title,
+                      text: text,
+                      url: window.location.href
+                    });
+                  } else {
+                    navigator.clipboard.writeText(window.location.href);
+                    setSubmitMsg("Link copied to clipboard!");
+                  }
+                }}
+              >
+                Share Location
               </button>
             </div>
           </div>
@@ -356,80 +586,132 @@ export default function PropertyDetails() {
           <hr style={styles.divider} />
 
           {/* DESCRIPTION */}
-          <h3 style={styles.sectionTitle}>About Property</h3>
-          <p style={styles.description}>{property.description}</p>
+          <h3 style={styles.sectionTitle}>About This Property</h3>
+          <div style={styles.description}>
+            {property.description ? (
+              <p style={styles.descriptionText}>{property.description}</p>
+            ) : (
+              <p style={styles.noDescription}>No description available.</p>
+            )}
+          </div>
 
           <hr style={styles.divider} />
 
           {/* EMI CALCULATOR */}
           <h3 style={styles.sectionTitle}>EMI Calculator</h3>
           <div style={styles.emiWrap}>
-            <div style={styles.emiRow}>
-              <label style={styles.emiLabel}>Property Price</label>
-              <input
-                type="number"
-                value={loanInputs.price}
-                onChange={(e) => setLoanInputs({ ...loanInputs, price: Number(e.target.value || 0) })}
-                style={styles.input}
-              />
-            </div>
+            <div style={styles.emiGrid}>
+              <div style={styles.emiInputGroup}>
+                <label style={styles.emiLabel}>Property Price</label>
+                <div style={styles.inputWithUnit}>
+                  <span style={styles.unit}>₹</span>
+                  <input
+                    type="number"
+                    min="0"
+                    value={loanInputs.price}
+                    onChange={(e) => setLoanInputs({ ...loanInputs, price: Number(e.target.value) || 0 })}
+                    style={styles.emiInput}
+                  />
+                </div>
+              </div>
 
-            <div style={styles.emiRow}>
-              <label style={styles.emiLabel}>Down Payment (%)</label>
-              <input
-                type="number"
-                step="0.1"
-                value={loanInputs.downPercent}
-                onChange={(e) => setLoanInputs({ ...loanInputs, downPercent: Number(e.target.value || 0) })}
-                style={styles.input}
-              />
-            </div>
+              <div style={styles.emiInputGroup}>
+                <label style={styles.emiLabel}>Down Payment</label>
+                <div style={styles.inputWithUnit}>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={loanInputs.downPercent}
+                    onChange={(e) => setLoanInputs({ ...loanInputs, downPercent: Number(e.target.value) || 0 })}
+                    style={styles.emiInput}
+                  />
+                  <span style={styles.unit}>%</span>
+                </div>
+                <div style={styles.helperText}>
+                  Amount: ₹{formatCurrency(loanInputs.price * (loanInputs.downPercent / 100))}
+                </div>
+              </div>
 
-            <div style={styles.emiRow}>
-              <label style={styles.emiLabel}>Interest Rate (annual %)</label>
-              <input
-                type="number"
-                step="0.01"
-                value={loanInputs.interestAnnual}
-                onChange={(e) => setLoanInputs({ ...loanInputs, interestAnnual: Number(e.target.value || 0) })}
-                style={styles.input}
-              />
-            </div>
+              <div style={styles.emiInputGroup}>
+                <label style={styles.emiLabel}>Interest Rate</label>
+                <div style={styles.inputWithUnit}>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={loanInputs.interestAnnual}
+                    onChange={(e) => setLoanInputs({ ...loanInputs, interestAnnual: Number(e.target.value) || 0 })}
+                    style={styles.emiInput}
+                  />
+                  <span style={styles.unit}>% p.a.</span>
+                </div>
+              </div>
 
-            <div style={styles.emiRow}>
-              <label style={styles.emiLabel}>Tenure (years)</label>
-              <input
-                type="number"
-                value={loanInputs.tenureYears}
-                onChange={(e) => setLoanInputs({ ...loanInputs, tenureYears: Number(e.target.value || 0) })}
-                style={styles.input}
-              />
+              <div style={styles.emiInputGroup}>
+                <label style={styles.emiLabel}>Loan Tenure</label>
+                <div style={styles.inputWithUnit}>
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={loanInputs.tenureYears}
+                    onChange={(e) => setLoanInputs({ ...loanInputs, tenureYears: Number(e.target.value) || 1 })}
+                    style={styles.emiInput}
+                  />
+                  <span style={styles.unit}>years</span>
+                </div>
+              </div>
             </div>
 
             <div style={styles.emiResult}>
-              <div>
-                <div style={styles.emiLabel}>Monthly EMI</div>
-                <div style={styles.emiBig}>₹ {Math.round(emiResult.emi).toLocaleString("en-IN")}</div>
+              <div style={styles.emiResultCard}>
+                <div style={styles.emiResultLabel}>Loan Amount</div>
+                <div style={styles.emiResultValue}>
+                  ₹ {formatCurrency(emiResult.loanAmount)}
+                </div>
               </div>
-              <div>
-                <div style={styles.emiLabel}>Total Payment</div>
-                <div>₹ {Math.round(emiResult.totalPayment).toLocaleString("en-IN")}</div>
+              <div style={styles.emiResultCard}>
+                <div style={styles.emiResultLabel}>Monthly EMI</div>
+                <div style={styles.emiResultValue}>
+                  ₹ {formatCurrency(emiResult.emi)}
+                </div>
               </div>
-              <div>
-                <div style={styles.emiLabel}>Total Interest</div>
-                <div>₹ {Math.round(emiResult.totalInterest).toLocaleString("en-IN")}</div>
+              <div style={styles.emiResultCard}>
+                <div style={styles.emiResultLabel}>Total Interest</div>
+                <div style={styles.emiResultValue}>
+                  ₹ {formatCurrency(emiResult.totalInterest)}
+                </div>
+              </div>
+              <div style={styles.emiResultCard}>
+                <div style={styles.emiResultLabel}>Total Payment</div>
+                <div style={styles.emiResultValue}>
+                  ₹ {formatCurrency(emiResult.totalPayment)}
+                </div>
               </div>
             </div>
 
             {emiResult.schedule?.length > 0 && (
               <div style={styles.amortPreview}>
-                <div style={{ fontWeight: 700, marginBottom: 8 }}>Amortization (first {emiResult.schedule.length} months)</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                <div style={styles.amortTitle}>
+                  Payment Schedule (First {emiResult.schedule.length} Months)
+                </div>
+                <div style={styles.amortTable}>
+                  <div style={styles.amortHeader}>
+                    <div>Month</div>
+                    <div>EMI</div>
+                    <div>Principal</div>
+                    <div>Interest</div>
+                    <div>Balance</div>
+                  </div>
                   {emiResult.schedule.map((r) => (
                     <div key={r.month} style={styles.amortRow}>
-                      <div style={{ fontWeight: 700 }}>M {r.month}</div>
-                      <div>Principal ₹{Math.round(r.principalRepay).toLocaleString("en-IN")}</div>
-                      <div>Bal ₹{Math.round(r.balance).toLocaleString("en-IN")}</div>
+                      <div style={styles.amortCell}>{r.month}</div>
+                      <div style={styles.amortCell}>₹{formatCurrency(r.emi)}</div>
+                      <div style={styles.amortCell}>₹{formatCurrency(r.principalRepay)}</div>
+                      <div style={styles.amortCell}>₹{formatCurrency(r.interest)}</div>
+                      <div style={styles.amortCell}>₹{formatCurrency(r.balance)}</div>
                     </div>
                   ))}
                 </div>
@@ -439,36 +721,89 @@ export default function PropertyDetails() {
 
           <hr style={styles.divider} />
 
-          {/* FACTS */}
+          {/* PROPERTY DETAILS */}
           <h3 style={styles.sectionTitle}>Property Details</h3>
           <div style={styles.factsGrid}>
-            <div style={styles.factBox}>
-              <div style={styles.factLabel}>Area</div>
-              <div style={styles.factValue}>{property.areaName || "—"}</div>
-            </div>
-            <div style={styles.factBox}>
-              <div style={styles.factLabel}>Nearby Highway</div>
-              <div style={styles.factValue}>{property.nearbyHighway || "—"}</div>
-            </div>
-            <div style={styles.factBox}>
-              <div style={styles.factLabel}>Project</div>
-              <div style={styles.factValue}>{property.projectName || "—"}</div>
-            </div>
+            {[
+              { label: "Area", value: property.areaName },
+              { label: "Project", value: property.projectName },
+              { label: "Nearby Highway", value: property.nearbyHighway },
+              { label: "Property Type", value: property.propertyType },
+              { label: "Built-up Area", value: property.builtUpArea && `${property.builtUpArea} sq.ft` },
+              { label: "Carpet Area", value: property.carpetArea && `${property.carpetArea} sq.ft` },
+              { label: "Bedrooms", value: property.bedrooms },
+              { label: "Bathrooms", value: property.bathrooms },
+              { label: "Parking", value: property.parking && `${property.parking} spots` },
+              { label: "Furnishing", value: property.furnishing },
+              { label: "Floor", value: property.floor },
+              { label: "Total Floors", value: property.totalFloors },
+            ].map((item, index) => (
+              item.value && (
+                <div key={index} style={styles.factBox}>
+                  <div style={styles.factLabel}>{item.label}</div>
+                  <div style={styles.factValue}>{item.value || "—"}</div>
+                </div>
+              )
+            ))}
           </div>
+
+          {/* AMENITIES */}
+          {property.amenities?.length > 0 && (
+            <>
+              <hr style={styles.divider} />
+              <h3 style={styles.sectionTitle}>Amenities</h3>
+              <div style={styles.amenitiesGrid}>
+                {property.amenities.map((amenity, index) => (
+                  <div key={index} style={styles.amenityItem}>
+                    <span style={styles.amenityIcon}>✓</span>
+                    <span>{amenity}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
 
           {/* RELATED PROPERTIES */}
           {related.length > 0 && (
             <>
               <hr style={styles.divider} />
-              <h3 style={styles.sectionTitle}>Related Properties</h3>
+              <h3 style={styles.sectionTitle}>Similar Properties</h3>
               <div style={styles.relatedRow}>
                 {related.map((p) => (
-                  <div key={p._id} style={styles.relatedCard} onClick={() => navigate(`/property/${p._id}`)}>
-                    <img src={p.images?.[0] ? `${BASE_URL}${p.images[0]}` : "https://via.placeholder.com/200x140"} alt="" style={styles.relatedImg} />
-                    <div style={{ marginTop: 8 }}>
+                  <div 
+                    key={p._id} 
+                    style={styles.relatedCard}
+                    onClick={() => navigate(`/property/${p._id}`)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyPress={(e) => e.key === 'Enter' && navigate(`/property/${p._id}`)}
+                  >
+                    <div style={styles.relatedImageContainer}>
+                      <img 
+                        src={p.images?.[0] ? fixMediaUrl(p.images[0]) : "/placeholder-property.jpg"} 
+                        alt={p.title}
+                        style={styles.relatedImg}
+                        onError={(e) => {
+                          e.target.src = "/placeholder-property.jpg";
+                        }}
+                      />
+                      <div style={styles.relatedOverlay}>
+                        <span>View Details</span>
+                      </div>
+                    </div>
+                    <div style={styles.relatedContent}>
                       <div style={styles.relatedTitle}>{p.title}</div>
-                      <div style={styles.relatedPrice}>₹ {p.price?.toLocaleString("en-IN")}</div>
-                      <div style={styles.relatedLoc}>📍 {p.areaName}, {p.city}</div>
+                      <div style={styles.relatedPrice}>₹ {formatCurrency(p.price)}</div>
+                      <div style={styles.relatedLoc}>
+                        <span>📍 {p.areaName}, {p.city}</span>
+                      </div>
+                      {p.bedrooms && (
+                        <div style={styles.relatedSpecs}>
+                          <span>{p.bedrooms} Beds</span>
+                          {p.bathrooms && <span>• {p.bathrooms} Baths</span>}
+                          {p.builtUpArea && <span>• {p.builtUpArea} sq.ft</span>}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -477,26 +812,145 @@ export default function PropertyDetails() {
           )}
         </div>
 
-        {/* RIGHT: agent + enquiry */}
+        {/* RIGHT COLUMN */}
         <div className="pdRight" style={styles.right}>
+          {/* AGENT INFO */}
           {property.agent && (
             <div style={styles.agentCard}>
               <h3 style={styles.agentTitle}>Agent Information</h3>
-              <p style={styles.agentName}>{property.agent.name}</p>
-              <p style={styles.agentEmail}>{property.agent.email}</p>
+              <div style={styles.agentInfo}>
+                <div style={styles.agentAvatar}>
+                  {property.agent.name?.charAt(0).toUpperCase()}
+                </div>
+                <div>
+                  <p style={styles.agentName}>{property.agent.name}</p>
+                  <p style={styles.agentEmail}>{property.agent.email}</p>
+                  {property.agent.phone && (
+                    <p style={styles.agentPhone}>{property.agent.phone}</p>
+                  )}
+                  {property.agent.company && (
+                    <p style={styles.agentCompany}>{property.agent.company}</p>
+                  )}
+                </div>
+              </div>
+              {property.agent.bio && (
+                <p style={styles.agentBio}>{property.agent.bio}</p>
+              )}
             </div>
           )}
 
+          {/* ENQUIRY FORM */}
           <div style={styles.formCard}>
             <h3 style={styles.formTitle}>Contact Agent</h3>
+            <p style={styles.formSubtitle}>Get more information or schedule a visit</p>
+            
             <form onSubmit={handleSubmit}>
-              <input type="text" placeholder="Your Name" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={styles.input} />
-              <input type="email" placeholder="Email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} style={styles.input} />
-              <input type="tel" placeholder="Phone" required value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} style={styles.input} />
-              <textarea placeholder="Message" value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })} style={styles.textarea} />
-              <button style={styles.btn}>Send Enquiry</button>
-              {submitMsg && <p style={styles.msg}>{submitMsg}</p>}
+              <div style={styles.formGroup}>
+                <input
+                  type="text"
+                  placeholder="Your Name *"
+                  required
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  style={styles.input}
+                  disabled={formSubmitting}
+                />
+              </div>
+              
+              <div style={styles.formGroup}>
+                <input
+                  type="email"
+                  placeholder="Email Address *"
+                  required
+                  value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })}
+                  style={styles.input}
+                  disabled={formSubmitting}
+                />
+              </div>
+              
+              <div style={styles.formGroup}>
+                <input
+                  type="tel"
+                  placeholder="Phone Number *"
+                  required
+                  value={form.phone}
+                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                  style={styles.input}
+                  disabled={formSubmitting}
+                />
+              </div>
+              
+              <div style={styles.formGroup}>
+                <textarea
+                  placeholder="Your Message (Optional)"
+                  value={form.message}
+                  onChange={(e) => setForm({ ...form, message: e.target.value })}
+                  style={styles.textarea}
+                  rows="4"
+                  disabled={formSubmitting}
+                />
+              </div>
+              
+              <button 
+                type="submit" 
+                style={styles.btn}
+                disabled={formSubmitting}
+              >
+                {formSubmitting ? (
+                  <>
+                    <div style={styles.buttonSpinner}></div>
+                    Sending...
+                  </>
+                ) : (
+                  'Send Enquiry'
+                )}
+              </button>
+              
+              {submitMsg && (
+                <p style={{
+                  ...styles.msg,
+                  color: submitMsg.includes('✅') ? '#2e7d32' : '#d32f2f'
+                }}>
+                  {submitMsg}
+                </p>
+              )}
+              
+              <p style={styles.privacyNote}>
+                By submitting, you agree to our Terms & Privacy Policy.
+              </p>
             </form>
+          </div>
+
+          {/* QUICK ACTIONS */}
+          <div style={styles.quickActions}>
+            <button
+              style={styles.actionButton}
+              onClick={() => {
+                const phone = property.agent?.phone || '+911234567890';
+                window.location.href = `tel:${phone}`;
+              }}
+            >
+              📞 Call Now
+            </button>
+            <button
+              style={styles.actionButton}
+              onClick={() => {
+                const email = property.agent?.email || 'info@example.com';
+                window.location.href = `mailto:${email}?subject=Regarding: ${property.title}`;
+              }}
+            >
+              ✉️ Email Agent
+            </button>
+            <button
+              style={styles.actionButton}
+              onClick={() => {
+                // Save to favorites/bookmarks
+                alert('Added to favorites!');
+              }}
+            >
+              ⭐ Save Property
+            </button>
           </div>
         </div>
       </div>
@@ -505,7 +959,6 @@ export default function PropertyDetails() {
       {lightboxOpen && (
         <Lightbox
           images={property.images || []}
-          base={BASE_URL}
           index={lightboxIndex}
           onClose={closeLightbox}
           onNext={nextImage}
@@ -516,62 +969,342 @@ export default function PropertyDetails() {
   );
 }
 
-/* ================ Lightbox component ================ */
-function Lightbox({ images, base, index, onClose, onNext, onPrev }) {
+/* ================ Lightbox Component ================ */
+function Lightbox({ images, index, onClose, onNext, onPrev }) {
+  const lightboxRef = useRef(null);
+  
   useEffect(() => {
-    const onKey = (e) => {
+    const handleKeyDown = (e) => {
       if (e.key === "Escape") onClose();
       if (e.key === "ArrowRight") onNext();
       if (e.key === "ArrowLeft") onPrev();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    
+    const handleClickOutside = (e) => {
+      if (lightboxRef.current && !lightboxRef.current.contains(e.target)) {
+        onClose();
+      }
+    };
+    
+    window.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("mousedown", handleClickOutside);
+    
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
   }, [onClose, onNext, onPrev]);
-
+  
   if (!images || images.length === 0) return null;
-  const src = `${base}${images[index]}`;
-
+  
   return (
     <div style={lightboxStyles.overlay}>
-      <button style={lightboxStyles.close} onClick={onClose} aria-label="Close">✕</button>
-      <button style={lightboxStyles.navLeft} onClick={onPrev} aria-label="Previous">‹</button>
-      <img src={src} style={lightboxStyles.img} alt="lightbox" />
-      <button style={lightboxStyles.navRight} onClick={onNext} aria-label="Next">›</button>
+      <div ref={lightboxRef} style={lightboxStyles.container}>
+        <button 
+          style={lightboxStyles.close} 
+          onClick={onClose}
+          aria-label="Close lightbox"
+        >
+          ✕
+        </button>
+        
+        <button 
+          style={lightboxStyles.navButton}
+          onClick={onPrev}
+          aria-label="Previous image"
+        >
+          ‹
+        </button>
+        
+        <div style={lightboxStyles.content}>
+          <img 
+            src={fixMediaUrl(images[index])} 
+            style={lightboxStyles.image} 
+            alt={`Property view ${index + 1}`}
+          />
+          <div style={lightboxStyles.caption}>
+            <span>{index + 1} / {images.length}</span>
+          </div>
+        </div>
+        
+        <button 
+          style={{...lightboxStyles.navButton, right: 20}}
+          onClick={onNext}
+          aria-label="Next image"
+        >
+          ›
+        </button>
+        
+        <div style={lightboxStyles.thumbnails}>
+          {images.slice(0, 8).map((img, i) => (
+            <img
+              key={i}
+              src={fixMediaUrl(img)}
+              style={{
+                ...lightboxStyles.thumbnail,
+                opacity: i === index ? 1 : 0.6
+              }}
+              onClick={() => {
+                // Navigate to clicked thumbnail
+                const event = new CustomEvent('lightboxNavigate', { detail: i });
+                window.dispatchEvent(event);
+              }}
+              alt=""
+            />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
 
 /* ========================= STYLES ========================= */
 const styles = {
-  page: { padding: "20px 40px", background: "#f5f7fb", fontFamily: "Inter, sans-serif" },
-
-  mainImageWrap: {
-    width: "100%", height: "430px", borderRadius: "18px", overflow: "hidden",
-    marginBottom: "18px", cursor: "zoom-in", boxShadow: "0 10px 40px rgba(0,0,0,0.2)"
+  page: {
+    padding: "20px 40px",
+    background: "#f5f7fb",
+    fontFamily: "'Inter', 'Segoe UI', sans-serif",
+    minHeight: "100vh",
+    animation: "fadeIn 0.3s ease-out"
   },
-  mainImage: { width: "100%", height: "100%", objectFit: "cover" },
-
-  layout: { display: "flex", gap: "35px", alignItems: "flex-start" },
-
-  left: { flex: 2 },
-  right: { flex: 1, position: "sticky", top: 25 },
-
-  title: { fontSize: 34, fontWeight: 900, color: "#0a2540", marginBottom: 6 },
-  priceRow: { marginTop: 6, marginBottom: 10 },
-  price: { color: "#d32f2f", fontSize: 26, fontWeight: 800 },
-  location: { color: "#444", fontSize: 16 },
-  divider: { margin: "18px 0", opacity: 0.2 },
-
-  galleryRow: { display: "flex", gap: 12, overflowX: "auto", paddingBottom: 6 },
-  thumb: { width: 120, height: 95, objectFit: "cover", borderRadius: 10, cursor: "pointer", transition: "0.25s" },
-
-  sectionTitle: { fontSize: 22, fontWeight: 700, color: "#0a2540" },
-  description: { lineHeight: 1.7, fontSize: 15, color: "#333" },
-
-  // Panorama viewer (basic draggable panorama)
+  
+  loadingContainer: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: "60vh",
+    gap: "20px"
+  },
+  
+  errorContainer: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: "60vh",
+    gap: "20px",
+    textAlign: "center"
+  },
+  
+  spinner: {
+    width: "50px",
+    height: "50px",
+    border: "4px solid #f3f3f3",
+    borderTop: "4px solid #0066ff",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite"
+  },
+  
+  miniSpinner: {
+    width: "20px",
+    height: "20px",
+    border: "2px solid #f3f3f3",
+    borderTop: "2px solid #0066ff",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite"
+  },
+  
+  backButton: {
+    padding: "10px 20px",
+    background: "transparent",
+    border: "1px solid #ddd",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontSize: "14px",
+    marginBottom: "20px",
+    display: "flex",
+    alignItems: "center",
+    gap: "5px",
+    transition: "all 0.2s",
+    "&:hover": {
+      background: "#f0f0f0"
+    }
+  },
+  
+  mainImageWrap: {
+    position: "relative",
+    width: "100%",
+    height: "500px",
+    borderRadius: "16px",
+    overflow: "hidden",
+    marginBottom: "24px",
+    cursor: "zoom-in",
+    boxShadow: "0 12px 40px rgba(0,0,0,0.15)",
+    transition: "transform 0.3s",
+    "&:hover": {
+      transform: "translateY(-2px)"
+    }
+  },
+  
+  mainImage: {
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+    transition: "transform 0.3s"
+  },
+  
+  imageOverlay: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    background: "linear-gradient(transparent, rgba(0,0,0,0.7))",
+    color: "white",
+    padding: "20px",
+    textAlign: "center",
+    fontSize: "14px",
+    opacity: 0,
+    transition: "opacity 0.3s"
+  },
+  
+  layout: {
+    display: "flex",
+    gap: "40px",
+    alignItems: "flex-start"
+  },
+  
+  left: {
+    flex: 2.5,
+    minWidth: 0 // Prevents overflow
+  },
+  
+  right: {
+    flex: 1,
+    position: "sticky",
+    top: "20px",
+    alignSelf: "flex-start"
+  },
+  
+  title: {
+    fontSize: "36px",
+    fontWeight: 800,
+    color: "#0a2540",
+    marginBottom: "8px",
+    lineHeight: 1.2
+  },
+  
+  priceRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "16px",
+    marginBottom: "8px"
+  },
+  
+  price: {
+    color: "#d32f2f",
+    fontSize: "28px",
+    fontWeight: 800
+  },
+  
+  pricePerSqFt: {
+    color: "#666",
+    fontSize: "16px",
+    background: "#f0f0f0",
+    padding: "4px 12px",
+    borderRadius: "20px"
+  },
+  
+  locationRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "12px",
+    marginBottom: "24px"
+  },
+  
+  location: {
+    fontSize: "16px",
+    color: "#444",
+    display: "flex",
+    alignItems: "center",
+    gap: "6px"
+  },
+  
+  city: {
+    background: "#e3f2fd",
+    color: "#0066ff",
+    padding: "4px 12px",
+    borderRadius: "20px",
+    fontSize: "14px",
+    fontWeight: 600
+  },
+  
+  badge: {
+    background: "#0066ff",
+    color: "white",
+    fontSize: "12px",
+    padding: "2px 8px",
+    borderRadius: "12px",
+    marginLeft: "10px",
+    verticalAlign: "middle"
+  },
+  
+  divider: {
+    margin: "32px 0",
+    border: "none",
+    height: "1px",
+    background: "linear-gradient(90deg, transparent, #ddd, transparent)"
+  },
+  
+  sectionTitle: {
+    fontSize: "24px",
+    fontWeight: 700,
+    color: "#0a2540",
+    marginBottom: "16px",
+    display: "flex",
+    alignItems: "center"
+  },
+  
+  galleryRow: {
+    display: "flex",
+    gap: "12px",
+    overflowX: "auto",
+    paddingBottom: "12px",
+    marginBottom: "24px"
+  },
+  
+  thumbContainer: {
+    position: "relative",
+    flexShrink: 0
+  },
+  
+  thumb: {
+    width: "140px",
+    height: "105px",
+    objectFit: "cover",
+    borderRadius: "12px",
+    cursor: "pointer",
+    transition: "all 0.2s",
+    "&:hover": {
+      transform: "scale(1.05)"
+    }
+  },
+  
+  thumbOverlay: {
+    position: "absolute",
+    inset: 0,
+    background: "rgba(0,0,0,0.5)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "white",
+    borderRadius: "12px",
+    opacity: 0,
+    transition: "opacity 0.2s",
+    cursor: "pointer",
+    "&:hover": {
+      opacity: 1
+    }
+  },
+  
+  panoramaContainer: {
+    position: "relative",
+    marginBottom: "24px"
+  },
+  
   panorama: {
-    height: 220,
-    borderRadius: 12,
+    height: "280px",
+    borderRadius: "16px",
     backgroundRepeat: "repeat-x",
     backgroundSize: "cover",
     backgroundPosition: "50% 50%",
@@ -579,74 +1312,725 @@ const styles = {
     display: "flex",
     alignItems: "flex-end",
     justifyContent: "center",
+    transition: "opacity 0.3s",
+    overflow: "hidden",
+    "&:active": {
+      cursor: "grabbing"
+    }
   },
-
+  
+  loadingOverlay: {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "rgba(255,255,255,0.8)",
+    gap: "10px",
+    color: "#666"
+  },
+  
+  panoramaHint: {
+    background: "rgba(0,0,0,0.7)",
+    color: "white",
+    padding: "8px 16px",
+    borderRadius: "20px",
+    marginBottom: "20px",
+    fontSize: "14px",
+    textAlign: "center",
+    backdropFilter: "blur(10px)"
+  },
+  
+  panoramaFallback: {
+    padding: "24px",
+    borderRadius: "16px",
+    background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+    color: "white",
+    textAlign: "center",
+    boxShadow: "0 8px 32px rgba(102, 126, 234, 0.3)"
+  },
+  
   videoWrapper: {
-  width: "100%",
-  maxWidth: 900,
-  margin: "12px auto",
-  borderRadius: 12,
-  overflow: "hidden",
-  background: "#000",
-},
-
-video: {
-  width: "100%",
-  height: "auto",
-  maxHeight: "70vh",
-  borderRadius: 12,
-},
-
-  panoramaHint: { background: "rgba(0,0,0,0.35)", color: "white", padding: "6px 10px", borderRadius: 10, marginBottom: 12, fontSize: 13 },
-
-  panoramaFallback: { padding: 18, borderRadius: 12, background: "#fff", boxShadow: "0 6px 20px rgba(0,0,0,0.06)" },
-  smallBtn: { marginTop: 10, padding: "8px 12px", borderRadius: 8, border: "none", cursor: "pointer", background: "#0066ff", color: "white" },
-
-  // Map
-  mapWrap: { marginTop: 8, borderRadius: 12, overflow: "hidden", boxShadow: "0 8px 30px rgba(0,0,0,0.12)" },
-  mapActionsRow: { display: "flex", justifyContent: "flex-end", marginTop: 8 },
-
-  // EMI
-  emiWrap: { background: "#fff", padding: 14, borderRadius: 12, boxShadow: "0 6px 20px rgba(0,0,0,0.06)", marginTop: 12 },
-  emiRow: { display: "flex", gap: 12, alignItems: "center", marginBottom: 10 },
-  emiLabel: { minWidth: 160, color: "#444", fontWeight: 600 },
-  emiBig: { fontSize: 20, fontWeight: 900, color: "#0a2540", marginTop: 6 },
-
-  emiResult: { display: "flex", gap: 18, justifyContent: "space-between", marginTop: 10 },
-  amortPreview: { marginTop: 12, fontSize: 13, color: "#333" },
-  amortRow: { padding: 8, borderRadius: 8, background: "#f7f9fb" },
-
-  // facts
-  factsGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12, marginTop: 8 },
-  factBox: { background: "#fff", padding: 12, borderRadius: 12, boxShadow: "0 4px 14px rgba(0,0,0,0.06)" },
-  factLabel: { color: "#666", fontSize: 13 }, factValue: { fontSize: 16, fontWeight: 800 },
-
-  // related
-  relatedRow: { display: "flex", gap: 16, overflowX: "auto", paddingBottom: 8, marginTop: 8 },
-  relatedCard: { minWidth: 230, background: "white", padding: 12, borderRadius: 12, boxShadow: "0 4px 16px rgba(0,0,0,0.08)", cursor: "pointer" },
-  relatedImg: { width: "100%", height: 140, objectFit: "cover", borderRadius: 8 },
-  relatedTitle: { fontSize: 16, fontWeight: 800 }, relatedPrice: { color: "#d32f2f", fontWeight: 800 }, relatedLoc: { color: "#666", fontSize: 13 },
-
-  // right side (sticky)
-  agentCard: { background: "#fff", padding: 18, borderRadius: 12, marginBottom: 14, boxShadow: "0 6px 20px rgba(0,0,0,0.12)" },
-  agentTitle: { fontSize: 18, fontWeight: 800 }, agentName: { fontSize: 16, marginTop: 6 }, agentEmail: { color: "#666" },
-
-  formCard: { background: "rgba(255,255,255,0.95)", padding: 16, borderRadius: 12, boxShadow: "0 6px 22px rgba(0,0,0,0.08)" },
-  formTitle: { fontSize: 18, fontWeight: 800, marginBottom: 10 },
-  input: { width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd", marginBottom: 10 },
-  textarea: { width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd", minHeight: 90, marginBottom: 10 },
-  btn: { width: "100%", padding: 12, background: "#0066ff", color: "white", border: "none", fontWeight: 800, borderRadius: 8, cursor: "pointer" },
-  msg: { marginTop: 10, textAlign: "center" },
+    width: "100%",
+    maxWidth: "900px",
+    margin: "20px 0",
+    borderRadius: "16px",
+    overflow: "hidden",
+    background: "#000",
+    boxShadow: "0 10px 40px rgba(0,0,0,0.2)"
+  },
+  
+  video: {
+    width: "100%",
+    height: "auto",
+    maxHeight: "70vh",
+    display: "block"
+  },
+  
+  mapWrap: {
+    marginTop: "8px",
+    borderRadius: "16px",
+    overflow: "hidden",
+    boxShadow: "0 8px 32px rgba(0,0,0,0.12)"
+  },
+  
+  mapIframe: {
+    border: "none",
+    display: "block"
+  },
+  
+  mapActionsRow: {
+    display: "flex",
+    gap: "12px",
+    marginTop: "16px",
+    flexWrap: "wrap"
+  },
+  
+  description: {
+    background: "white",
+    padding: "24px",
+    borderRadius: "16px",
+    boxShadow: "0 4px 20px rgba(0,0,0,0.06)"
+  },
+  
+  descriptionText: {
+    lineHeight: 1.7,
+    fontSize: "16px",
+    color: "#333",
+    margin: 0
+  },
+  
+  noDescription: {
+    color: "#999",
+    fontStyle: "italic",
+    textAlign: "center",
+    padding: "20px"
+  },
+  
+  emiWrap: {
+    background: "white",
+    padding: "24px",
+    borderRadius: "16px",
+    boxShadow: "0 4px 20px rgba(0,0,0,0.06)"
+  },
+  
+  emiGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+    gap: "20px",
+    marginBottom: "24px"
+  },
+  
+  emiInputGroup: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px"
+  },
+  
+  emiLabel: {
+    color: "#444",
+    fontWeight: 600,
+    fontSize: "14px",
+    marginBottom: "4px"
+  },
+  
+  inputWithUnit: {
+    display: "flex",
+    alignItems: "center",
+    border: "1px solid #ddd",
+    borderRadius: "8px",
+    overflow: "hidden",
+    background: "white"
+  },
+  
+  unit: {
+    padding: "0 12px",
+    background: "#f8f9fa",
+    color: "#666",
+    fontSize: "14px",
+    height: "100%",
+    display: "flex",
+    alignItems: "center"
+  },
+  
+  emiInput: {
+    flex: 1,
+    padding: "12px",
+    border: "none",
+    outline: "none",
+    fontSize: "16px",
+    "&:focus": {
+      background: "#f8f9fa"
+    }
+  },
+  
+  helperText: {
+    fontSize: "12px",
+    color: "#666",
+    marginTop: "4px"
+  },
+  
+  emiResult: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+    gap: "16px",
+    marginBottom: "24px"
+  },
+  
+  emiResultCard: {
+    background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+    color: "white",
+    padding: "20px",
+    borderRadius: "12px",
+    textAlign: "center"
+  },
+  
+  emiResultLabel: {
+    fontSize: "14px",
+    opacity: 0.9,
+    marginBottom: "8px"
+  },
+  
+  emiResultValue: {
+    fontSize: "22px",
+    fontWeight: 800
+  },
+  
+  amortPreview: {
+    marginTop: "24px",
+    paddingTop: "24px",
+    borderTop: "1px solid #eee"
+  },
+  
+  amortTitle: {
+    fontWeight: 700,
+    marginBottom: "16px",
+    color: "#0a2540",
+    fontSize: "16px"
+  },
+  
+  amortTable: {
+    background: "#f8f9fa",
+    borderRadius: "12px",
+    overflow: "hidden"
+  },
+  
+  amortHeader: {
+    display: "grid",
+    gridTemplateColumns: "repeat(5, 1fr)",
+    background: "#0066ff",
+    color: "white",
+    padding: "12px",
+    fontSize: "12px",
+    fontWeight: 600,
+    textTransform: "uppercase"
+  },
+  
+  amortRow: {
+    display: "grid",
+    gridTemplateColumns: "repeat(5, 1fr)",
+    padding: "12px",
+    borderBottom: "1px solid #eee",
+    "&:nth-child(even)": {
+      background: "rgba(255,255,255,0.5)"
+    }
+  },
+  
+  amortCell: {
+    fontSize: "14px",
+    color: "#333"
+  },
+  
+  factsGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+    gap: "16px",
+    marginTop: "8px"
+  },
+  
+  factBox: {
+    background: "white",
+    padding: "20px",
+    borderRadius: "12px",
+    boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
+    transition: "transform 0.2s",
+    "&:hover": {
+      transform: "translateY(-2px)"
+    }
+  },
+  
+  factLabel: {
+    color: "#666",
+    fontSize: "13px",
+    marginBottom: "8px"
+  },
+  
+  factValue: {
+    fontSize: "18px",
+    fontWeight: 700,
+    color: "#0a2540"
+  },
+  
+  amenitiesGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+    gap: "12px",
+    marginTop: "16px"
+  },
+  
+  amenityItem: {
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+    padding: "12px",
+    background: "white",
+    borderRadius: "8px",
+    boxShadow: "0 2px 8px rgba(0,0,0,0.05)"
+  },
+  
+  amenityIcon: {
+    color: "#4caf50",
+    fontWeight: "bold"
+  },
+  
+  relatedRow: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+    gap: "20px",
+    marginTop: "8px"
+  },
+  
+  relatedCard: {
+    background: "white",
+    borderRadius: "16px",
+    overflow: "hidden",
+    boxShadow: "0 4px 20px rgba(0,0,0,0.08)",
+    cursor: "pointer",
+    transition: "all 0.3s",
+    "&:hover": {
+      transform: "translateY(-4px)",
+      boxShadow: "0 12px 40px rgba(0,0,0,0.15)"
+    }
+  },
+  
+  relatedImageContainer: {
+    position: "relative",
+    height: "200px",
+    overflow: "hidden"
+  },
+  
+  relatedImg: {
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+    transition: "transform 0.3s"
+  },
+  
+  relatedOverlay: {
+    position: "absolute",
+    inset: 0,
+    background: "rgba(0,0,0,0.6)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "white",
+    opacity: 0,
+    transition: "opacity 0.3s",
+    "&:hover": {
+      opacity: 1
+    }
+  },
+  
+  relatedContent: {
+    padding: "20px"
+  },
+  
+  relatedTitle: {
+    fontSize: "18px",
+    fontWeight: 700,
+    color: "#0a2540",
+    marginBottom: "8px",
+    lineHeight: 1.3
+  },
+  
+  relatedPrice: {
+    color: "#d32f2f",
+    fontSize: "20px",
+    fontWeight: 800,
+    marginBottom: "8px"
+  },
+  
+  relatedLoc: {
+    color: "#666",
+    fontSize: "14px",
+    marginBottom: "8px",
+    display: "flex",
+    alignItems: "center",
+    gap: "4px"
+  },
+  
+  relatedSpecs: {
+    display: "flex",
+    gap: "8px",
+    fontSize: "13px",
+    color: "#888",
+    marginTop: "8px"
+  },
+  
+  agentCard: {
+    background: "white",
+    padding: "24px",
+    borderRadius: "16px",
+    marginBottom: "24px",
+    boxShadow: "0 6px 24px rgba(0,0,0,0.1)"
+  },
+  
+  agentTitle: {
+    fontSize: "20px",
+    fontWeight: 700,
+    color: "#0a2540",
+    marginBottom: "20px"
+  },
+  
+  agentInfo: {
+    display: "flex",
+    gap: "16px",
+    alignItems: "center",
+    marginBottom: "20px"
+  },
+  
+  agentAvatar: {
+    width: "60px",
+    height: "60px",
+    borderRadius: "50%",
+    background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+    color: "white",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "24px",
+    fontWeight: "bold"
+  },
+  
+  agentName: {
+    fontSize: "18px",
+    fontWeight: 700,
+    color: "#0a2540",
+    margin: "0 0 4px 0"
+  },
+  
+  agentEmail: {
+    color: "#666",
+    fontSize: "14px",
+    margin: "0 0 4px 0"
+  },
+  
+  agentPhone: {
+    color: "#0066ff",
+    fontSize: "14px",
+    fontWeight: 600,
+    margin: "0 0 4px 0"
+  },
+  
+  agentCompany: {
+    color: "#888",
+    fontSize: "13px",
+    margin: "0"
+  },
+  
+  agentBio: {
+    fontSize: "14px",
+    color: "#666",
+    lineHeight: 1.6,
+    borderTop: "1px solid #eee",
+    paddingTop: "20px",
+    margin: "20px 0 0 0"
+  },
+  
+  formCard: {
+    background: "white",
+    padding: "24px",
+    borderRadius: "16px",
+    boxShadow: "0 6px 24px rgba(0,0,0,0.1)",
+    marginBottom: "24px"
+  },
+  
+  formTitle: {
+    fontSize: "20px",
+    fontWeight: 700,
+    color: "#0a2540",
+    marginBottom: "8px"
+  },
+  
+  formSubtitle: {
+    fontSize: "14px",
+    color: "#666",
+    marginBottom: "24px"
+  },
+  
+  formGroup: {
+    marginBottom: "16px"
+  },
+  
+  input: {
+    width: "100%",
+    padding: "14px",
+    borderRadius: "8px",
+    border: "1px solid #ddd",
+    fontSize: "16px",
+    transition: "all 0.2s",
+    "&:focus": {
+      outline: "none",
+      borderColor: "#0066ff",
+      boxShadow: "0 0 0 3px rgba(0,102,255,0.1)"
+    },
+    "&:disabled": {
+      background: "#f8f9fa",
+      cursor: "not-allowed"
+    }
+  },
+  
+  textarea: {
+    width: "100%",
+    padding: "14px",
+    borderRadius: "8px",
+    border: "1px solid #ddd",
+    fontSize: "16px",
+    resize: "vertical",
+    minHeight: "100px",
+    transition: "all 0.2s",
+    "&:focus": {
+      outline: "none",
+      borderColor: "#0066ff",
+      boxShadow: "0 0 0 3px rgba(0,102,255,0.1)"
+    },
+    "&:disabled": {
+      background: "#f8f9fa",
+      cursor: "not-allowed"
+    }
+  },
+  
+  btn: {
+    width: "100%",
+    padding: "16px",
+    background: "linear-gradient(135deg, #0066ff 0%, #0052cc 100%)",
+    color: "white",
+    border: "none",
+    fontWeight: 700,
+    fontSize: "16px",
+    borderRadius: "8px",
+    cursor: "pointer",
+    transition: "all 0.2s",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "10px",
+    "&:hover": {
+      transform: "translateY(-1px)",
+      boxShadow: "0 8px 20px rgba(0,102,255,0.3)"
+    },
+    "&:disabled": {
+      opacity: 0.7,
+      cursor: "not-allowed",
+      transform: "none"
+    }
+  },
+  
+  buttonSpinner: {
+    width: "20px",
+    height: "20px",
+    border: "2px solid rgba(255,255,255,0.3)",
+    borderTop: "2px solid white",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite"
+  },
+  
+  msg: {
+    marginTop: "16px",
+    textAlign: "center",
+    fontSize: "14px",
+    padding: "12px",
+    borderRadius: "8px",
+    background: "#f8f9fa"
+  },
+  
+  privacyNote: {
+    fontSize: "12px",
+    color: "#888",
+    textAlign: "center",
+    marginTop: "16px",
+    lineHeight: 1.5
+  },
+  
+  quickActions: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "12px"
+  },
+  
+  actionButton: {
+    padding: "14px",
+    background: "white",
+    border: "1px solid #ddd",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontSize: "15px",
+    fontWeight: 600,
+    transition: "all 0.2s",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "8px",
+    "&:hover": {
+      background: "#f8f9fa",
+      borderColor: "#0066ff",
+      color: "#0066ff",
+      transform: "translateY(-1px)"
+    }
+  },
+  
+  secondaryButton: {
+    padding: "12px 20px",
+    background: "white",
+    border: "1px solid #ddd",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontSize: "14px",
+    fontWeight: 600,
+    transition: "all 0.2s",
+    "&:hover": {
+      background: "#f8f9fa",
+      borderColor: "#0066ff",
+      color: "#0066ff"
+    }
+  }
 };
 
 /* ================= Lightbox styles ================= */
 const lightboxStyles = {
   overlay: {
-    position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
-    background: "rgba(0,0,0,0.92)", zIndex: 9999,
+    position: "fixed",
+    inset: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "rgba(0,0,0,0.95)",
+    zIndex: 9999,
+    animation: "fadeIn 0.2s ease-out"
   },
-  img: { maxWidth: "92%", maxHeight: "88%", borderRadius: 12 },
-  close: { position: "absolute", top: 18, right: 22, fontSize: 32, color: "#fff", background: "transparent", border: "none", cursor: "pointer" },
-  navLeft: { position: "absolute", left: 18, top: "50%", transform: "translateY(-50%)", fontSize: 54, color: "#fff", background: "transparent", border: "none", cursor: "pointer" },
-  navRight: { position: "absolute", right: 18, top: "50%", transform: "translateY(-50%)", fontSize: 54, color: "#fff", background: "transparent", border: "none", cursor: "pointer" },
+  
+  container: {
+    position: "relative",
+    width: "90vw",
+    height: "90vh",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  
+  content: {
+    position: "relative",
+    width: "100%",
+    height: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  
+  image: {
+    maxWidth: "100%",
+    maxHeight: "100%",
+    objectFit: "contain",
+    borderRadius: "4px"
+  },
+  
+  caption: {
+    position: "absolute",
+    bottom: "20px",
+    left: "50%",
+    transform: "translateX(-50%)",
+    background: "rgba(0,0,0,0.7)",
+    color: "white",
+    padding: "8px 16px",
+    borderRadius: "20px",
+    fontSize: "14px",
+    backdropFilter: "blur(10px)"
+  },
+  
+  close: {
+    position: "absolute",
+    top: "20px",
+    right: "20px",
+    fontSize: "32px",
+    color: "#fff",
+    background: "rgba(0,0,0,0.5)",
+    border: "none",
+    cursor: "pointer",
+    width: "50px",
+    height: "50px",
+    borderRadius: "50%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    transition: "all 0.2s",
+    zIndex: 10000,
+    "&:hover": {
+      background: "rgba(0,0,0,0.8)",
+      transform: "scale(1.1)"
+    }
+  },
+  
+  navButton: {
+    position: "absolute",
+    top: "50%",
+    transform: "translateY(-50%)",
+    left: "20px",
+    fontSize: "60px",
+    color: "rgba(255,255,255,0.8)",
+    background: "rgba(0,0,0,0.5)",
+    border: "none",
+    cursor: "pointer",
+    width: "60px",
+    height: "60px",
+    borderRadius: "50%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    transition: "all 0.2s",
+    zIndex: 10000,
+    "&:hover": {
+      background: "rgba(0,0,0,0.8)",
+      color: "white",
+      transform: "translateY(-50%) scale(1.1)"
+    }
+  },
+  
+  thumbnails: {
+    position: "absolute",
+    bottom: "20px",
+    left: "50%",
+    transform: "translateX(-50%)",
+    display: "flex",
+    gap: "10px",
+    padding: "10px",
+    background: "rgba(0,0,0,0.5)",
+    borderRadius: "12px",
+    backdropFilter: "blur(10px)",
+    maxWidth: "90%",
+    overflowX: "auto"
+  },
+  
+  thumbnail: {
+    width: "60px",
+    height: "45px",
+    objectFit: "cover",
+    borderRadius: "6px",
+    cursor: "pointer",
+    transition: "all 0.2s",
+    "&:hover": {
+      opacity: 1,
+      transform: "scale(1.1)"
+    }
+  }
 };
