@@ -7,6 +7,9 @@ export default function ServiceHome() {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  
+  // New state for tracking subscription renewal
+  const [showRenewButton, setShowRenewButton] = useState(true); // You can conditionally set this based on user's subscription status
 
   // Filters
   const [city, setCity] = useState("All");
@@ -168,6 +171,12 @@ export default function ServiceHome() {
           100% { transform: rotate(360deg); }
         }
         
+        @keyframes pulse {
+          0% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0.7); }
+          70% { box-shadow: 0 0 0 10px rgba(255, 193, 7, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0); }
+        }
+        
         .service-card {
           transition: all 0.3s ease;
         }
@@ -189,6 +198,11 @@ export default function ServiceHome() {
         @media (max-width: 768px) {
           .hero-title { font-size: 32px !important; }
           .search-container { flex-direction: column !important; }
+          .renew-button { 
+            position: static !important; 
+            margin: 20px auto !important;
+            width: auto !important;
+          }
         }
       `}</style>
 
@@ -330,6 +344,18 @@ export default function ServiceHome() {
 
       {/* ========================= MAIN CONTENT ========================= */}
       <div style={styles.container}>
+        {/* Renew Subscription Button - Floating on right side */}
+        {showRenewButton && (
+          <button
+            style={styles.renewButton}
+            onClick={() => navigate("/renew")}
+            className="renew-button"
+            title="Renew your subscription"
+          >
+            🔄 Renew Subscription
+          </button>
+        )}
+
         <div style={styles.headerRow}>
           <h2 style={styles.sectionTitle}>
             Popular Services
@@ -494,6 +520,73 @@ export default function ServiceHome() {
                 </div>
               </div>
             </div>
+
+            {/* Features Section */}
+            <div style={styles.featuresSection}>
+              <h2 style={styles.sectionTitle}>Why Choose Our Services?</h2>
+              <div style={styles.featuresGrid}>
+                {[
+                  {
+                    icon: "✓",
+                    title: "Verified Providers",
+                    description: "All professionals are background-checked and verified"
+                  },
+                  {
+                    icon: "💰",
+                    title: "Transparent Pricing",
+                    description: "No hidden charges, upfront quotes"
+                  },
+                  {
+                    icon: "⭐",
+                    title: "Quality Guarantee",
+                    description: "30-day service warranty on all repairs"
+                  },
+                  {
+                    icon: "🚚",
+                    title: "Same-Day Service",
+                    description: "Available in most areas"
+                  },
+                  {
+                    icon: "📱",
+                    title: "Easy Booking",
+                    description: "Book in under 2 minutes"
+                  },
+                  {
+                    icon: "👨‍👩‍👧",
+                    title: "Trusted by Families",
+                    description: "Serving 10,000+ happy customers"
+                  },
+                ].map((feature, index) => (
+                  <div key={index} style={styles.featureCard}>
+                    <div style={styles.featureIcon}>{feature.icon}</div>
+                    <h4 style={styles.featureTitle}>{feature.title}</h4>
+                    <p style={styles.featureDescription}>{feature.description}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* CTA Section */}
+            <div style={styles.ctaSection}>
+              <h2 style={styles.ctaTitle}>Are You a Service Provider?</h2>
+              <p style={styles.ctaText}>
+                Join thousands of professionals and grow your business with us
+              </p>
+              <div style={styles.ctaButtons}>
+                <button
+                  style={styles.ctaButtonPrimary}
+                  onClick={() => navigate("/service-provider-register")}
+                >
+                  Register as Provider
+                </button>
+                <button
+                  style={styles.ctaButtonSecondary}
+                  onClick={() => navigate("service-provider-login")}
+                >
+                  Provider Login
+                </button>
+              </div>
+            </div>
           </>
         )}
       </div>
@@ -560,7 +653,8 @@ const styles = {
   page: { 
     background: "linear-gradient(180deg, #f8fafc 0%, #ffffff 100%)", 
     minHeight: "100vh",
-    fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif"
+    fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+    position: "relative"
   },
 
   // Hero Section
@@ -733,6 +827,39 @@ const styles = {
     padding: "0 20px 40px",
     position: "relative",
     zIndex: 1
+  },
+
+  // Renew Button - Floating on right side
+  renewButton: {
+    position: "fixed",
+    top: "120px",
+    right: "20px",
+    zIndex: 100,
+    padding: "12px 20px",
+    background: "linear-gradient(135deg, #FFC107 0%, #FF9800 100%)",
+    color: "#333",
+    border: "none",
+    borderRadius: "30px",
+    fontWeight: "700",
+    fontSize: "14px",
+    cursor: "pointer",
+    boxShadow: "0 4px 15px rgba(255, 152, 0, 0.3)",
+    animation: "pulse 2s infinite",
+    transition: "all 0.3s ease",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    "&:hover": {
+      transform: "translateY(-2px)",
+      boxShadow: "0 8px 25px rgba(255, 152, 0, 0.4)",
+      background: "linear-gradient(135deg, #FFD54F 0%, #FFA726 100%)"
+    },
+    "@media (max-width: 768px)": {
+      position: "static",
+      margin: "20px auto",
+      display: "block",
+      width: "fit-content"
+    }
   },
 
   headerRow: {
@@ -1064,7 +1191,8 @@ const styles = {
     borderRadius: "16px",
     padding: "30px",
     color: "white",
-    marginTop: "40px"
+    marginTop: "40px",
+    marginBottom: "40px"
   },
 
   statsTitle: {
@@ -1098,5 +1226,117 @@ const styles = {
   statLabel: {
     fontSize: "14px",
     opacity: 0.9
+  },
+
+  // Features Section
+  featuresSection: {
+    marginTop: "40px",
+    padding: "50px 0",
+    textAlign: "center",
+    background: "#fff",
+    borderRadius: "16px",
+    boxShadow: "0 8px 30px rgba(0,0,0,0.05)",
+    marginBottom: "40px"
+  },
+
+  featuresGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+    gap: "30px",
+    marginTop: "40px",
+    padding: "0 20px"
+  },
+
+  featureCard: {
+    padding: "25px",
+    background: "linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)",
+    borderRadius: "12px",
+    transition: "all 0.3s ease",
+    textAlign: "center",
+    "&:hover": {
+      transform: "translateY(-5px)",
+      boxShadow: "0 15px 30px rgba(0, 102, 255, 0.1)"
+    }
+  },
+
+  featureIcon: {
+    fontSize: "40px",
+    marginBottom: "15px"
+  },
+
+  featureTitle: {
+    fontSize: "18px",
+    fontWeight: 700,
+    color: "#1a1a1a",
+    marginBottom: "10px"
+  },
+
+  featureDescription: {
+    fontSize: "14px",
+    color: "#666",
+    lineHeight: 1.5
+  },
+
+  // CTA Section
+  ctaSection: {
+    background: "linear-gradient(135deg, #0066ff 0%, #0052cc 100%)",
+    borderRadius: "16px",
+    padding: "50px",
+    color: "white",
+    textAlign: "center",
+    marginTop: "40px"
+  },
+
+  ctaTitle: {
+    fontSize: "32px",
+    fontWeight: 700,
+    marginBottom: "15px"
+  },
+
+  ctaText: {
+    fontSize: "16px",
+    opacity: 0.9,
+    marginBottom: "30px",
+    maxWidth: "600px",
+    margin: "0 auto"
+  },
+
+  ctaButtons: {
+    display: "flex",
+    gap: "20px",
+    justifyContent: "center",
+    flexWrap: "wrap"
+  },
+
+  ctaButtonPrimary: {
+    padding: "15px 30px",
+    background: "white",
+    color: "#0066ff",
+    border: "none",
+    borderRadius: "8px",
+    fontSize: "16px",
+    fontWeight: 700,
+    cursor: "pointer",
+    transition: "all 0.3s ease",
+    "&:hover": {
+      transform: "translateY(-2px)",
+      boxShadow: "0 10px 25px rgba(255,255,255,0.2)"
+    }
+  },
+
+  ctaButtonSecondary: {
+    padding: "15px 30px",
+    background: "transparent",
+    color: "white",
+    border: "2px solid white",
+    borderRadius: "8px",
+    fontSize: "16px",
+    fontWeight: 700,
+    cursor: "pointer",
+    transition: "all 0.3s ease",
+    "&:hover": {
+      background: "white",
+      color: "#0066ff"
+    }
   }
 };

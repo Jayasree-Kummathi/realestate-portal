@@ -314,13 +314,16 @@ function DocCard({ title, file }) {
   return (
     <div style={styles.documentCard}>
       <b style={styles.documentTitle}>{title}</b>
+      
       <img
-  src={fixMediaUrl(image)}
-  onError={(e) => {
-    e.target.onerror = null;
-    e.target.src = "/no-image.png";
-  }}
-/>
+        src={fixMediaUrl(file)}
+        alt={title}
+        style={styles.documentImage}
+        onError={(e) => {
+          e.target.onerror = null;
+          e.target.src = "/no-image.png";
+        }}
+      />
 
 
       <div style={styles.documentOverlay}>

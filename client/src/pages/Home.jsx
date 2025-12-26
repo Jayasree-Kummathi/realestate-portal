@@ -24,6 +24,15 @@ export default function Home() {
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [selectedPropertyTypes, setSelectedPropertyTypes] = useState([]);
   
+  // Renew Subscription State
+  const [showRenewButton, setShowRenewButton] = useState(true);
+  const [showRenewModal, setShowRenewModal] = useState(false);
+  const [subscriptionStatus, setSubscriptionStatus] = useState({
+    active: false,
+    expiresIn: 0,
+    plan: "Free"
+  });
+
   const suggestTimer = useRef(null);
   
   const slideImages = [
@@ -43,8 +52,113 @@ export default function Home() {
   const statsRef = useRef({ views: 1248, saved: 342, inquiries: 89 });
   const lastScrollY = useRef(0);
   const searchBarRef = useRef(null);
+  const floatingBtnRef = useRef(null);
+  const particlesRef = useRef([]);
 
   const navigate = useNavigate();
+
+  /* ------------------ Particle Animation ------------------ */
+  useEffect(() => {
+    const canvas = document.getElementById('particles-canvas');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    particlesRef.current = Array.from({ length: 50 }, () => ({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      size: Math.random() * 2 + 1,
+      speedX: Math.random() * 0.5 - 0.25,
+      speedY: Math.random() * 0.5 - 0.25,
+      color: `rgba(102, 126, 234, ${Math.random() * 0.3 + 0.1})`
+    }));
+
+    const animateParticles = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      particlesRef.current.forEach(particle => {
+        particle.x += particle.speedX;
+        particle.y += particle.speedY;
+        
+        if (particle.x > canvas.width) particle.x = 0;
+        if (particle.x < 0) particle.x = canvas.width;
+        if (particle.y > canvas.height) particle.y = 0;
+        if (particle.y < 0) particle.y = canvas.height;
+        
+        ctx.beginPath();
+        ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+        ctx.fillStyle = particle.color;
+        ctx.fill();
+        
+        // Draw connections
+        particlesRef.current.forEach(otherParticle => {
+          const dx = particle.x - otherParticle.x;
+          const dy = particle.y - otherParticle.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          
+          if (distance < 100) {
+            ctx.beginPath();
+            ctx.strokeStyle = `rgba(102, 126, 234, ${0.1 * (1 - distance/100)})`;
+            ctx.lineWidth = 0.5;
+            ctx.moveTo(particle.x, particle.y);
+            ctx.lineTo(otherParticle.x, otherParticle.y);
+            ctx.stroke();
+          }
+        });
+      });
+      
+      requestAnimationFrame(animateParticles);
+    };
+
+    animateParticles();
+
+    const handleResize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  /* ------------------ Check Subscription Status ------------------ */
+  useEffect(() => {
+    checkSubscriptionStatus();
+  }, []);
+
+  const checkSubscriptionStatus = async () => {
+    try {
+      const response = await api.get('/subscription/status');
+      setSubscriptionStatus(response.data);
+      
+      // Show renew button if subscription is expired or about to expire
+      if (!response.data.active || response.data.expiresIn <= 7) {
+        setShowRenewButton(true);
+      }
+    } catch (error) {
+      console.error('Error checking subscription status:', error);
+    }
+  };
+
+  const handleRenewSubscription = () => {
+    setShowRenewModal(true);
+  };
+
+  const renewSubscription = async (plan) => {
+    try {
+      const response = await api.post('/subscription/renew', { plan });
+      if (response.data.success) {
+        alert('Subscription renewed successfully!');
+        setShowRenewModal(false);
+        checkSubscriptionStatus();
+      }
+    } catch (error) {
+      console.error('Error renewing subscription:', error);
+      alert('Failed to renew subscription. Please try again.');
+    }
+  };
 
   /* ------------------ initial load ------------------ */
   useEffect(() => {
@@ -69,10 +183,23 @@ export default function Home() {
           searchBar.style.transform = "translateY(0)";
           searchBar.style.opacity = "1";
           searchBar.style.boxShadow = "0 10px 40px rgba(0,0,0,0.15)";
+          searchBar.style.backdropFilter = "blur(10px)";
         } else {
           searchBar.style.transform = "translateY(-10px)";
           searchBar.style.opacity = "0.95";
           searchBar.style.boxShadow = "0 20px 50px rgba(10,20,40,0.12)";
+          searchBar.style.backdropFilter = "blur(5px)";
+        }
+      }
+
+      // Floating button position
+      if (floatingBtnRef.current) {
+        if (scrollTop > 500) {
+          floatingBtnRef.current.style.opacity = "1";
+          floatingBtnRef.current.style.transform = "translateY(0)";
+        } else {
+          floatingBtnRef.current.style.opacity = "0";
+          floatingBtnRef.current.style.transform = "translateY(20px)";
         }
       }
     };
@@ -572,6 +699,12 @@ export default function Home() {
   /* ------------------ UI ------------------ */
   return (
     <div style={styles.container}>
+      {/* Particle Background */}
+      <canvas 
+        id="particles-canvas" 
+        style={styles.particlesCanvas}
+      />
+
       {/* CSS Styles */}
       <style>{`
         :root {
@@ -602,9 +735,11 @@ export default function Home() {
         @keyframes pulse {
           0%, 100% {
             opacity: 1;
+            transform: scale(1);
           }
           50% {
-            opacity: 0.7;
+            opacity: 0.8;
+            transform: scale(1.05);
           }
         }
 
@@ -625,6 +760,33 @@ export default function Home() {
           to {
             opacity: 1;
             transform: translateX(0);
+          }
+        }
+
+        @keyframes glow {
+          0%, 100% {
+            box-shadow: 0 0 20px rgba(255, 193, 7, 0.5);
+          }
+          50% {
+            box-shadow: 0 0 40px rgba(255, 193, 7, 0.8);
+          }
+        }
+
+        @keyframes rotate {
+          from {
+            transform: rotate(0deg);
+          }
+          to {
+            transform: rotate(360deg);
+          }
+        }
+
+        @keyframes bounce {
+          0%, 100% {
+            transform: translateY(0);
+          }
+          50% {
+            transform: translateY(-10px);
           }
         }
 
@@ -669,10 +831,27 @@ export default function Home() {
 
         .property-type-card {
           transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+          position: relative;
+          overflow: hidden;
         }
 
         .property-type-card:hover {
           transform: translateY(-8px) scale(1.05);
+        }
+
+        .property-type-card::before {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: -100%;
+          width: 100%;
+          height: 100%;
+          background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+          transition: 0.5s;
+        }
+
+        .property-type-card:hover::before {
+          left: 100%;
         }
 
         .service-card {
@@ -681,23 +860,56 @@ export default function Home() {
 
         .service-card:hover {
           transform: translateY(-8px) scale(1.02);
+          box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
         }
 
         .property-card {
           transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+          position: relative;
         }
 
         .property-card:hover {
           transform: translateY(-8px) scale(1.02);
+          box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
         }
 
         .property-card:hover .property-image {
           transform: scale(1.1);
         }
 
+        .property-card::after {
+          content: '';
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(to bottom, transparent 60%, rgba(0,0,0,0.7) 100%);
+          opacity: 0;
+          transition: opacity 0.3s;
+          border-radius: 16px;
+          pointer-events: none;
+        }
+
+        .property-card:hover::after {
+          opacity: 1;
+        }
+
         .stats-card {
           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
           animation: float 6s ease-in-out infinite;
+          position: relative;
+          overflow: hidden;
+        }
+
+        .stats-card::before {
+          content: '';
+          position: absolute;
+          top: -50%;
+          left: -50%;
+          width: 200%;
+          height: 200%;
+          background: radial-gradient(circle, rgba(255,255,255,0.1) 1px, transparent 1px);
+          background-size: 20px 20px;
+          animation: rotate 20s linear infinite;
+          opacity: 0.2;
         }
 
         .gradient-text {
@@ -707,6 +919,16 @@ export default function Home() {
           -webkit-text-fill-color: transparent;
           background-clip: text;
           animation: shimmer 3s linear infinite;
+        }
+
+        .glow-text {
+          text-shadow: 0 0 10px rgba(255, 193, 7, 0.7),
+                       0 0 20px rgba(255, 193, 7, 0.5),
+                       0 0 30px rgba(255, 193, 7, 0.3);
+        }
+
+        .floating-button {
+          animation: bounce 2s ease-in-out infinite;
         }
 
         @media (max-width: 920px) {
@@ -768,7 +990,51 @@ export default function Home() {
           background-size: 200% 100%;
           animation: shimmer 1.5s infinite;
         }
+
+        .blur-backdrop {
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+        }
       `}</style>
+
+      {/* Floating Renew Button */}
+      {showRenewButton && (
+        <div ref={floatingBtnRef} style={styles.floatingRenewButton} className="floating-button">
+          <button 
+            style={styles.renewButton}
+            onClick={handleRenewSubscription}
+            title="Renew your subscription"
+          >
+            <span style={styles.renewIcon}>🔄</span>
+            <span style={styles.renewText}>
+              {subscriptionStatus.active ? 'Upgrade Plan' : 'Renew Subscription'}
+            </span>
+            {!subscriptionStatus.active && (
+              <span style={styles.renewBadge}>!</span>
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* Renew Subscription Modal */}
+     {/* Floating Renew Button */}
+{showRenewButton && (
+  <div ref={floatingBtnRef} style={styles.floatingRenewButton}>
+    <button 
+      style={styles.renewButton}
+      onClick={() => navigate('/renew')} // Changed from handleRenewSubscription
+      title="Renew your subscription"
+    >
+      <span style={styles.renewIcon}>🔄</span>
+      <span style={styles.renewText}>
+        {subscriptionStatus.active ? 'Upgrade Plan' : 'Renew Subscription'}
+      </span>
+      {!subscriptionStatus.active && (
+        <span style={styles.renewBadge}>!</span>
+      )}
+    </button>
+  </div>
+)}
 
       {/* ===== HERO SECTION ===== */}
       <section style={styles.heroWrap}>
@@ -812,7 +1078,7 @@ export default function Home() {
 
         <div style={styles.heroInner}>
           <h1 style={styles.heroTitle}>
-            <span className="gradient-text">Find Your Dream Property</span>
+            <span className="gradient-text glow-text">Find Your Dream Property</span>
             <br />
             In The Perfect Location
           </h1>
@@ -838,7 +1104,7 @@ export default function Home() {
 
         {/* Floating Search Bar */}
         <div ref={searchBarRef} style={styles.floatingSearchWrapper} className="sticky-search-bar">
-          <div style={styles.searchBar} className="searchBarFlex">
+          <div style={styles.searchBar} className="searchBarFlex blur-backdrop">
             {/* Active Filters Badge */}
             {activeFilterCount > 0 && (
               <div style={styles.activeFilterBadge}>
@@ -1348,6 +1614,287 @@ const styles = {
     fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
     background: "linear-gradient(180deg, #f7f9fb 0%, #ffffff 100%)",
     minHeight: "100vh",
+    position: "relative",
+  },
+
+  particlesCanvas: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    pointerEvents: "none",
+    zIndex: 1,
+  },
+
+  /* ----- Floating Renew Button ----- */
+ floatingRenewButton: {
+  position: "fixed",
+  top: "120px",
+  right: "20px",
+  zIndex: 1000,
+  display: "block", // Make sure this is "block"
+  opacity: 1, // Must be 1
+  transform: "translateY(0)", // Must be 0
+  transition: "all 0.3s ease",
+},
+
+  renewButton: {
+    padding: "12px 20px",
+    background: "linear-gradient(135deg, #FFC107 0%, #FF9800 100%)",
+    color: "#333",
+    border: "none",
+    borderRadius: "30px",
+    fontWeight: "700",
+    fontSize: "14px",
+    cursor: "pointer",
+    boxShadow: "0 4px 15px rgba(255, 152, 0, 0.3)",
+    animation: "glow 2s infinite",
+    transition: "all 0.3s ease",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    position: "relative",
+    "&:hover": {
+      transform: "translateY(-2px)",
+      boxShadow: "0 8px 25px rgba(255, 152, 0, 0.4)",
+      background: "linear-gradient(135deg, #FFD54F 0%, #FFA726 100%)",
+    },
+  },
+
+  renewIcon: {
+    fontSize: "16px",
+  },
+
+  renewText: {
+    fontWeight: "600",
+  },
+
+  renewBadge: {
+    position: "absolute",
+    top: "-8px",
+    right: "-8px",
+    background: "#ff5252",
+    color: "white",
+    width: "20px",
+    height: "20px",
+    borderRadius: "50%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "12px",
+    fontWeight: "bold",
+    animation: "pulse 1s infinite",
+  },
+
+  /* ----- Renew Modal ----- */
+  modalOverlay: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    backdropFilter: "blur(4px)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 2000,
+    padding: "20px",
+  },
+
+  modalContent: {
+    background: "white",
+    borderRadius: "20px",
+    width: "100%",
+    maxWidth: "800px",
+    maxHeight: "90vh",
+    overflow: "auto",
+    boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.25)",
+    animation: "slideInRight 0.3s ease-out",
+  },
+
+  modalHeader: {
+    padding: "24px 24px 0",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    borderBottom: "1px solid #e5e7eb",
+    paddingBottom: "16px",
+  },
+
+  modalTitle: {
+    fontSize: "24px",
+    fontWeight: "700",
+    color: "#1f2937",
+    margin: 0,
+  },
+
+  modalClose: {
+    background: "none",
+    border: "none",
+    fontSize: "24px",
+    cursor: "pointer",
+    color: "#6b7280",
+    padding: "4px",
+    "&:hover": {
+      color: "#374151",
+    },
+  },
+
+  modalBody: {
+    padding: "24px",
+  },
+
+  currentPlan: {
+    marginBottom: "32px",
+  },
+
+  currentPlanTitle: {
+    fontSize: "18px",
+    fontWeight: "600",
+    color: "#374151",
+    marginBottom: "16px",
+  },
+
+  planCard: {
+    display: "flex",
+    alignItems: "center",
+    gap: "16px",
+    padding: "20px",
+    background: "linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%)",
+    borderRadius: "12px",
+    border: "2px solid #d1d5db",
+  },
+
+  planIcon: {
+    fontSize: "32px",
+    color: "#667eea",
+  },
+
+  planDetails: {
+    flex: 1,
+  },
+
+  planName: {
+    fontSize: "20px",
+    fontWeight: "700",
+    color: "#1f2937",
+    margin: "0 0 4px 0",
+  },
+
+  planStatus: {
+    fontSize: "14px",
+    color: "#6b7280",
+    margin: 0,
+  },
+
+  plansGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
+    gap: "20px",
+    marginBottom: "24px",
+  },
+
+  planOption: {
+    border: "2px solid #e5e7eb",
+    borderRadius: "12px",
+    padding: "24px",
+    transition: "all 0.3s ease",
+    "&:hover": {
+      borderColor: "#667eea",
+      transform: "translateY(-4px)",
+      boxShadow: "0 10px 25px rgba(102, 126, 234, 0.1)",
+    },
+  },
+
+  planOptionHeader: {
+    marginBottom: "20px",
+    position: "relative",
+  },
+
+  planOptionTitle: {
+    fontSize: "20px",
+    fontWeight: "700",
+    color: "#1f2937",
+    margin: "0 0 8px 0",
+  },
+
+  planOptionPrice: {
+    fontSize: "24px",
+    fontWeight: "800",
+    color: "#667eea",
+  },
+
+  recommendedBadge: {
+    position: "absolute",
+    top: "-12px",
+    right: "-12px",
+    background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+    color: "white",
+    padding: "4px 12px",
+    borderRadius: "20px",
+    fontSize: "12px",
+    fontWeight: "600",
+  },
+
+  planFeatures: {
+    listStyle: "none",
+    padding: 0,
+    margin: "0 0 24px 0",
+  },
+
+  planFeatures: {
+    margin: "0 0 24px 0",
+    paddingLeft: "20px",
+  },
+
+  planFeatures: {
+    "& li": {
+      marginBottom: "8px",
+      fontSize: "14px",
+      color: "#4b5563",
+      "&:last-child": {
+        marginBottom: 0,
+      },
+    },
+  },
+
+  selectPlanBtn: {
+    width: "100%",
+    padding: "12px",
+    background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+    color: "white",
+    border: "none",
+    borderRadius: "8px",
+    fontWeight: "600",
+    fontSize: "16px",
+    cursor: "pointer",
+    transition: "all 0.3s ease",
+    "&:hover": {
+      transform: "translateY(-2px)",
+      boxShadow: "0 10px 25px rgba(102, 126, 234, 0.3)",
+    },
+  },
+
+  modalFooter: {
+    padding: "16px 24px",
+    borderTop: "1px solid #e5e7eb",
+    textAlign: "right",
+  },
+
+  cancelBtn: {
+    padding: "10px 20px",
+    background: "#f3f4f6",
+    color: "#374151",
+    border: "none",
+    borderRadius: "8px",
+    fontWeight: "600",
+    fontSize: "14px",
+    cursor: "pointer",
+    "&:hover": {
+      background: "#e5e7eb",
+    },
   },
 
   /* ----- Hero ----- */
@@ -1358,6 +1905,7 @@ const styles = {
     overflow: "visible",
     marginBottom: "120px",
     animation: "fadeInUp 0.8s ease-out",
+    zIndex: 2,
   },
 
   slidesWrap: {
@@ -1532,12 +2080,13 @@ const styles = {
     display: "flex",
     gap: "12px",
     alignItems: "center",
-    background: "#fff",
+    background: "rgba(255, 255, 255, 0.95)",
     padding: "14px",
     borderRadius: "12px",
     boxShadow: "0 20px 50px rgba(10,20,40,0.12)",
     flexWrap: "wrap",
     position: "relative",
+    border: "1px solid rgba(255,255,255,0.2)",
   },
 
   searchItem: {
@@ -1583,6 +2132,7 @@ const styles = {
     outline: "none",
     fontSize: "15px",
     fontFamily: "inherit",
+    background: "rgba(255,255,255,0.9)",
     "&:focus": {
       borderColor: "#667eea",
       boxShadow: "0 0 0 3px rgba(102, 126, 234, 0.1)",
@@ -1645,7 +2195,7 @@ const styles = {
 
   suggestionBox: {
     marginTop: "10px",
-    background: "#fff",
+    background: "rgba(255, 255, 255, 0.98)",
     borderRadius: "12px",
     boxShadow: "0 6px 24px rgba(0,0,0,0.12)",
     maxHeight: "300px",
@@ -1653,6 +2203,7 @@ const styles = {
     position: "relative",
     zIndex: 50,
     animation: "fadeInUp 0.2s ease-out",
+    backdropFilter: "blur(10px)",
   },
 
   suggestionHeader: {
@@ -1670,7 +2221,7 @@ const styles = {
     borderRadius: "6px",
     cursor: "pointer",
     marginBottom: "2px",
-    background: "#fff",
+    background: "transparent",
     transition: "background 0.2s",
     display: "flex",
     justifyContent: "space-between",
@@ -1698,6 +2249,8 @@ const styles = {
   propertyTypesSection: {
     marginBottom: "60px",
     animation: "fadeInUp 0.6s ease-out",
+    position: "relative",
+    zIndex: 2,
   },
 
   propertyTypesGrid: {
@@ -1716,6 +2269,7 @@ const styles = {
     transition: "all 0.3s ease",
     boxShadow: "0 10px 30px rgba(10,20,40,0.06)",
     position: "relative",
+    overflow: "hidden",
     "&:hover": {
       boxShadow: "0 20px 40px rgba(10,20,40,0.12)",
     },
@@ -1755,6 +2309,8 @@ const styles = {
   servicesSection: {
     marginBottom: "80px",
     animation: "fadeInUp 0.6s ease-out",
+    position: "relative",
+    zIndex: 2,
   },
 
   sectionHeader: {
@@ -1907,6 +2463,8 @@ const styles = {
   propertiesSection: {
     marginBottom: "80px",
     animation: "fadeInUp 0.6s ease-out",
+    position: "relative",
+    zIndex: 2,
   },
 
   filterSummary: {
@@ -2261,6 +2819,8 @@ const styles = {
   statsSection: {
     marginBottom: "80px",
     animation: "fadeInUp 0.6s ease-out",
+    position: "relative",
+    zIndex: 2,
   },
 
   statsGrid: {
@@ -2278,6 +2838,8 @@ const styles = {
     textAlign: "center",
     boxShadow: "0 15px 40px rgba(102, 126, 234, 0.3)",
     transition: "transform 0.3s ease",
+    position: "relative",
+    overflow: "hidden",
     "&:hover": {
       transform: "translateY(-10px)",
     },
@@ -2287,17 +2849,23 @@ const styles = {
     fontSize: "48px",
     marginBottom: "16px",
     opacity: 0.9,
+    position: "relative",
+    zIndex: 1,
   },
 
   statNumber: {
     fontSize: "36px",
     fontWeight: 800,
     marginBottom: "8px",
+    position: "relative",
+    zIndex: 1,
   },
 
   statLabel: {
     fontSize: "16px",
     opacity: 0.9,
+    position: "relative",
+    zIndex: 1,
   },
 
   /* ----- Mobile Filters Modal ----- */

@@ -493,8 +493,8 @@ async function sendWelcomeEmail({ to, name, role }) {
                 <h4>💬 Need Assistance?</h4>
                 <p style="color: #4b5563;">
                     Our support team is here to help you succeed.<br>
-                    Email: support@realestate24x7.com<br>
-                    Phone: +91-XXX-XXX-XXXX
+                    Email: miithyderabad@gmail.com<br>
+                    Phone: +91-83416 02908
                 </p>
             </div>
             
