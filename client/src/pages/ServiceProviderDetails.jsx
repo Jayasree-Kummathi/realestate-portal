@@ -2,6 +2,8 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../api/api";
+import { fixMediaUrl } from "../utils/fixMediaUrl";
+
 
 export default function ServiceProviderDetails() {
   const navigate = useNavigate();
@@ -274,12 +276,17 @@ export default function ServiceProviderDetails() {
               <p style={styles.serviceDescription}>{s.description}</p>
               
               {s.images?.length > 0 && (
-                <img
-                  src={`${import.meta.env.VITE_API_URL || 'http://localhost:4000'}/${s.images[0].replace(/^\//, "")}`}
-                  alt="service"
-                  style={styles.serviceImage}
-                />
-              )}
+  <img
+    src={fixMediaUrl(s.images[0])}
+    alt="service"
+    style={styles.serviceImage}
+    onError={(e) => {
+      e.target.src =
+        "https://via.placeholder.com/400x300?text=Image+Not+Available";
+    }}
+  />
+)}
+
               
               <div style={styles.serviceFooter}>
                 <span style={styles.serviceCategory}>{s.category}</span>
@@ -308,10 +315,15 @@ function DocCard({ title, file }) {
     <div style={styles.documentCard}>
       <b style={styles.documentTitle}>{title}</b>
       <img
-        src={`${import.meta.env.VITE_API_URL || 'http://localhost:4000'}/${file}`}
-        alt={title}
-        style={styles.documentImage}
-      />
+  src={fixMediaUrl(file)}
+  alt={title}
+  style={styles.documentImage}
+  onError={(e) => {
+    e.target.src =
+      "https://via.placeholder.com/300x400?text=Document";
+  }}
+/>
+
       <div style={styles.documentOverlay}>
         <button 
           onClick={() => window.open(`${import.meta.env.VITE_API_URL || 'http://localhost:4000'}/${file}`, '_blank')}

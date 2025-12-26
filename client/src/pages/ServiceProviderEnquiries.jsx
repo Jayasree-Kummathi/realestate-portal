@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from "react";
 import api from "../api/api"; // ✅ Import your api client
+import { fixMediaUrl } from "../utils/fixMediaUrl";
+
 
 import { ServiceProviderAPI } from "../api/apiService";
 
@@ -27,10 +29,11 @@ export default function ServiceProviderEnquiries() {
   // Search filter
   useEffect(() => {
     const f = enquiries.filter((e) =>
-      (e.name + e.phone + e.service?.title)
-        .toLowerCase()
-        .includes(search.toLowerCase())
-    );
+  `${e.name || ""} ${e.phone || ""} ${e.service?.title || ""}`
+    .toLowerCase()
+    .includes(search.toLowerCase())
+);
+
     setFiltered(f);
   }, [search, enquiries]);
 
@@ -72,19 +75,25 @@ export default function ServiceProviderEnquiries() {
                   <td style={styles.td}>
                     <div style={styles.serviceBox}>
                       <img
-                        src={
-                          e.service?.images?.[0]
-                            ? `http://localhost:4000${e.service.images[0]}`
-                            : "https://via.placeholder.com/80?text=No+Img"
-                        }
-                        alt="service"
-                        style={styles.serviceImg}
-                      />
+  src={
+    e.service?.images?.[0]
+      ? fixMediaUrl(e.service.images[0])
+      : "/no-image.png"
+  }
+  alt="service"
+  style={styles.serviceImg}
+  onError={(ev) => {
+    ev.target.onerror = null;
+    ev.target.src = "/no-image.png";
+  }}
+/>
+
                       <div>
                         <strong>{e.service?.title || "N/A"}</strong> <br />
                         <small style={{ color: "#777" }}>
-                          ₹{e.service?.price}
-                        </small>
+  ₹{e.service?.price ?? "N/A"}
+</small>
+
                       </div>
                     </div>
                   </td>

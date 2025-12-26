@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { ServiceProviderAPI } from "../api/apiService";
 import { useNavigate } from "react-router-dom";
+import { fixMediaUrl } from "../utils/fixMediaUrl";
 
 export default function ServiceProviderDashboard() {
   const [services, setServices] = useState([]);
@@ -15,7 +16,8 @@ export default function ServiceProviderDashboard() {
 
         // Get services
         const res = await ServiceProviderAPI.myServices();
-        setServices(res.data);
+        setServices(res.data?.services || res.data || []);
+
 
         // Get subscription status
         if (storedUser._id) {
@@ -52,9 +54,12 @@ export default function ServiceProviderDashboard() {
     }
   };
 
-  const handleViewDetails = () => {
-    navigate("/service-provider/:id");
-  };
+ const handleViewDetails = () => {
+  const user = JSON.parse(localStorage.getItem("user") || "{}");
+  if (!user._id) return alert("User not found");
+  navigate(`/service-provider/${user._id}`);
+};
+
 
   const handleRenewSubscription = () => {
     navigate("/subscription-renew");
@@ -158,13 +163,17 @@ export default function ServiceProviderDashboard() {
         </div>
         <div style={styles.statCard}>
           <h3 style={styles.statNumber}>
-            ₹{services.reduce((sum, service) => sum + (service.price || 0), 0).toLocaleString('en-IN')}
+            ₹{services.reduce(
+  (sum, service) => sum + Number(service.price || 0),
+  0
+)
+}
           </h3>
           <p style={styles.statLabel}>Total Value</p>
         </div>
         <div style={styles.statCard}>
           <h3 style={styles.statNumber}>
-            {new Set(services.map(s => s.category)).size}
+            {new Set(services.filter(s => s.category).map(s => s.category)).size}
           </h3>
           <p style={styles.statLabel}>Categories</p>
         </div>
@@ -200,10 +209,15 @@ export default function ServiceProviderDashboard() {
                 {service.images && service.images.length > 0 && (
                   <div style={styles.serviceImageContainer}>
                     <img
-                      src={`${import.meta.env.VITE_API_URL || 'http://localhost:4000'}/${service.images[0].replace(/^\//, "")}`}
-                      alt={service.title}
-                      style={styles.serviceImage}
-                    />
+  src={fixMediaUrl(service.images[0])}
+  alt={service.title}
+  style={styles.serviceImage}
+  onError={(e) => {
+    e.target.onerror = null;
+    e.target.src = "/placeholder-service.png";
+  }}
+/>
+
                     <div style={styles.serviceBadge}>
                       {service.status || "Active"}
                     </div>
