@@ -1,20 +1,16 @@
 // src/utils/fixMediaUrl.js
 const BACKEND_URL =
-  import.meta.env.VITE_SERVER_URL?.replace(/\/api$/, "") ||
-  "https://realestate-portal-1-wm4q.onrender.com";
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:4000";
 
 export function fixMediaUrl(url) {
   if (!url) return "";
 
-  // Replace old localhost URLs
-  if (url.includes("localhost:4000")) {
-    return url.replace("http://localhost:4000", BACKEND_URL);
-  }
+  // Already absolute
+  if (url.startsWith("http")) return url;
 
-  // Relative path → absolute
-  if (url.startsWith("/")) {
-    return `${BACKEND_URL}${url}`;
-  }
+  // Ensure single slash
+  const clean = url.startsWith("/") ? url : `/${url}`;
 
-  return url;
+  return `${BACKEND_URL}${clean}`;
 }

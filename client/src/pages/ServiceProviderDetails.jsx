@@ -315,18 +315,17 @@ function DocCard({ title, file }) {
     <div style={styles.documentCard}>
       <b style={styles.documentTitle}>{title}</b>
       <img
-  src={fixMediaUrl(file)}
-  alt={title}
-  style={styles.documentImage}
+  src={fixMediaUrl(image)}
   onError={(e) => {
-    e.target.src =
-      "https://via.placeholder.com/300x400?text=Document";
+    e.target.onerror = null;
+    e.target.src = "/no-image.png";
   }}
 />
 
+
       <div style={styles.documentOverlay}>
         <button 
-          onClick={() => window.open(`${import.meta.env.VITE_API_URL || 'http://localhost:4000'}/${file}`, '_blank')}
+          onClick={() => window.open(fixMediaUrl(file), "_blank")}
           style={styles.viewDocBtn}
         >
           🔍 View Full Size
