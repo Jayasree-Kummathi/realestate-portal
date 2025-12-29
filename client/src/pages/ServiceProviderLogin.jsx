@@ -42,38 +42,99 @@ const handleLogin = async (e) => {
     localStorage.clear();
     delete api.defaults.headers.Authorization;
 
+    console.log("🔄 Sending service provider login request for:", email);
+
     const res = await api.post("/service-provider/login", {
       email: email.toLowerCase().trim(),
       password: password.trim(),
     });
 
+    console.log("✅ Service Provider Login Response:", res.data);
+    
     const { token, provider } = res.data;
 
     if (!token || !provider) {
+      console.error("❌ Missing token or provider data:", res.data);
       throw new Error("Invalid login response");
     }
 
-    // ✅ SAVE TOKEN
+    // ✅ SAVE TOKENS (Multiple formats)
     localStorage.setItem("providerToken", token);
     localStorage.setItem("token", token);
     api.defaults.headers.Authorization = `Bearer ${token}`;
 
-    // ✅ SAVE USER
+    // ✅ SAVE USER DATA IN MULTIPLE FORMATS
+    
+    // Format 1: user (with role flags)
     localStorage.setItem(
       "user",
       JSON.stringify({
-        _id: provider._id,
-        name: provider.name,
-        email: provider.email,
+        ...provider,
         isService: true,
         isAgent: false,
         isAdmin: false,
         isMarketing: false,
+        role: "service-provider",
+        userType: "service-provider"
       })
     );
+    
+    // Format 2: providerUser (for AuthContext compatibility)
+    localStorage.setItem(
+      "providerUser",
+      JSON.stringify({
+        ...provider,
+        role: "service-provider",
+        userType: "service-provider"
+      })
+    );
+    
+    // Format 3: Store userType separately
+    localStorage.setItem("userType", "service-provider");
+    
+    // Store provider ID separately
+    if (provider._id) {
+      localStorage.setItem("providerId", provider._id);
+    }
 
+    console.log("💾 Service Provider Login - Stored Data:", {
+      token: localStorage.getItem("token"),
+      providerToken: localStorage.getItem("providerToken"),
+      userType: localStorage.getItem("userType"),
+      user: localStorage.getItem("user"),
+      providerUser: localStorage.getItem("providerUser"),
+      allKeys: Object.keys(localStorage)
+    });
+
+    console.log("🔑 Service Provider logged in:", {
+      id: provider._id,
+      name: provider.name,
+      email: provider.email,
+      subscription: provider.subscription,
+    });
+
+    setMsg("✅ Login successful! Redirecting...");
     setLoading(false);
-    nav("/service-home"); // ✅ dashboard
+
+    // Check subscription status
+    if (provider.subscription?.active !== true) {
+      console.log("⚠️ Subscription inactive, redirecting to renewal");
+      nav("/renew", {
+        state: {
+          userId: provider._id,
+          email: provider.email,
+          name: provider.name,
+          userType: "service-provider",
+          subscription: provider.subscription
+        }
+      });
+      return;
+    }
+    
+    // All good - go to dashboard with page reload
+    setTimeout(() => {
+      window.location.href = "/service-home";
+    }, 500);
 
   } catch (err) {
     setLoading(false);
@@ -85,20 +146,31 @@ const handleLogin = async (e) => {
     ) {
       const data = err.response.data.data;
 
-      // optional: save temp renewal context
+      // Save renewal context
       localStorage.setItem(
         "renewalContext",
         JSON.stringify(data)
       );
 
-      nav("/renewal", {
+      nav("/renew", {
         state: data,
       });
       return;
     }
 
-    console.error("Service login failed:", err);
-    setMsg("❌ Invalid email or password");
+    console.error("Service login failed:", {
+      status: err.response?.status,
+      data: err.response?.data,
+      message: err.message
+    });
+
+    // Handle invalid credentials
+    if (err.response?.status === 400 || err.response?.status === 401) {
+      setMsg("❌ " + (err.response?.data?.error || "Invalid email or password"));
+      return;
+    }
+
+    setMsg("❌ Login failed. Please try again.");
   }
 };
 

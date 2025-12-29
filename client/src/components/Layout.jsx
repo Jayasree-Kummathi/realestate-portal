@@ -17,7 +17,7 @@ export default function Layout() {
 
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
-  }, [location.pathname]); // ✅ runs again when page changes
+  }, [location.pathname]);
 
   return (
     <>

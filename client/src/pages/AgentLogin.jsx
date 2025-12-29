@@ -49,9 +49,9 @@ const handleSubmit = async (e) => {
     console.log("✅ Login response:", res.data);
     console.log("🔍 Response keys:", Object.keys(res.data));
 
-    // ⭐ FIX: Check for BOTH "agent" AND "user" fields
+    // Check for token and agent data
     const token = res.data.token;
-    const agentData = res.data.agent || res.data.user; // Try both!
+    const agentData = res.data.agent || res.data.user;
     
     if (!token || !agentData) {
       console.error("❌ Missing token or user data:", {
@@ -65,12 +65,14 @@ const handleSubmit = async (e) => {
       return;
     }
 
-    // ✅ SAVE TOKEN
+    // ✅ SAVE TOKENS (Multiple formats for compatibility)
     localStorage.setItem("token", token);
     localStorage.setItem("agentToken", token);
     api.defaults.headers.Authorization = `Bearer ${token}`;
 
-    // ✅ SAVE USER DATA
+    // ✅ SAVE USER DATA IN MULTIPLE FORMATS
+    
+    // Format 1: user (with role flags)
     localStorage.setItem(
       "user",
       JSON.stringify({
@@ -78,8 +80,37 @@ const handleSubmit = async (e) => {
         isAgent: true,
         isAdmin: false,
         isService: false,
+        role: "agent",
+        userType: "agent"
       })
     );
+    
+    // Format 2: agentUser (for AuthContext compatibility)
+    localStorage.setItem(
+      "agentUser",
+      JSON.stringify({
+        ...agentData,
+        role: "agent",
+        userType: "agent"
+      })
+    );
+    
+    // Format 3: Store userType separately
+    localStorage.setItem("userType", "agent");
+    
+    // Store agent ID separately
+    if (agentData._id) {
+      localStorage.setItem("agentId", agentData._id);
+    }
+
+    console.log("💾 Agent Login - Stored Data:", {
+      token: localStorage.getItem("token"),
+      agentToken: localStorage.getItem("agentToken"),
+      userType: localStorage.getItem("userType"),
+      user: localStorage.getItem("user"),
+      agentUser: localStorage.getItem("agentUser"),
+      allKeys: Object.keys(localStorage)
+    });
 
     console.log("🔑 Agent logged in:", {
       id: agentData._id,
@@ -88,7 +119,7 @@ const handleSubmit = async (e) => {
       subscription: agentData.subscription,
     });
 
-    setMsg(""); // Clear errors
+    setMsg("✅ Login successful! Redirecting...");
     setLoading(false);
 
     // ✅ Check subscription (optional)
@@ -106,8 +137,10 @@ const handleSubmit = async (e) => {
       return;
     }
     
-    // All good - go to dashboard
-    nav("/agent-dashboard");
+    // All good - go to dashboard with page reload
+    setTimeout(() => {
+      window.location.href = "/agent-dashboard";
+    }, 500);
 
   } catch (err) {
     setLoading(false);

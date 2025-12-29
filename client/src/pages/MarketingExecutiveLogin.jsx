@@ -12,30 +12,83 @@ export default function MELogin() {
   }
 
   async function handleSubmit(e) {
-    e.preventDefault();
-    setMsg("");
+  e.preventDefault();
+  setMsg("");
 
-    try {
-      const res = await api.post("/marketing-executive/login", form);
+  try {
+    const res = await api.post("/marketing-executive/login", form);
 
+    console.log("📊 Marketing Login Response:", res.data); // Debug log
+
+    if (res.data.success && res.data.token && res.data.exec) {
+      // Clear all old authentication data first
+      localStorage.clear();
+      
+      // Store marketing executive token
       localStorage.setItem("meToken", res.data.token);
-      localStorage.removeItem("marketingToken");
-      localStorage.removeItem("marketingExecutiveToken");
-
+      localStorage.setItem("marketingToken", res.data.token); // For compatibility
+      localStorage.setItem("token", res.data.token); // Generic token for AuthContext
+      
+      // Store user data with proper role identification
       localStorage.setItem(
         "user",
         JSON.stringify({
           ...res.data.exec,
           isMarketing: true,
+          role: "marketing-executive",
+          userType: "marketing-executive"
         })
       );
+      
+      // Also store in marketingUser format for AuthContext compatibility
+      localStorage.setItem(
+        "marketingUser",
+        JSON.stringify({
+          ...res.data.exec,
+          role: "marketing-executive",
+          userType: "marketing-executive"
+        })
+      );
+      
+      // Store userType separately for easy access
+      localStorage.setItem("userType", "marketing-executive");
+      
+      // Store marketing executive ID
+      if (res.data.exec._id) {
+        localStorage.setItem("marketingExecutiveId", res.data.exec._id);
+      }
+      if (res.data.exec.meid) {
+        localStorage.setItem("meid", res.data.exec.meid);
+      }
 
-      nav("/marketing-executive/dashboard");
-    } catch (err) {
-      console.error("Login Error:", err.response?.data || err.message);
-      setMsg("❌ Invalid login details");
+      console.log("💾 Marketing Login - Stored Data:", {
+        meToken: localStorage.getItem("meToken"),
+        marketingToken: localStorage.getItem("marketingToken"),
+        userType: localStorage.getItem("userType"),
+        user: localStorage.getItem("user"),
+        marketingUser: localStorage.getItem("marketingUser"),
+        allKeys: Object.keys(localStorage)
+      });
+
+      // Force a small delay to ensure localStorage is saved
+      setTimeout(() => {
+        console.log("🚀 Navigating to marketing dashboard");
+        nav("/marketing-executive/dashboard");
+        
+        // Force page reload to update navbar and auth state
+        setTimeout(() => {
+          window.location.reload();
+        }, 100);
+      }, 100);
+      
+    } else {
+      setMsg("❌ Login failed: Invalid response from server");
     }
+  } catch (err) {
+    console.error("Login Error:", err.response?.data || err.message);
+    setMsg("❌ Invalid login details");
   }
+}
 
   return (
     <div style={styles.page}>
