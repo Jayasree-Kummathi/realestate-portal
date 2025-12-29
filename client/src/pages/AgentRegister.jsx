@@ -831,7 +831,7 @@ async function handleSubmit(e) {
           background: rgba(255, 255, 255, 0.05);
           border: 2px solid rgba(255, 255, 255, 0.1);
           border-radius: 12px;
-          color: #fff;
+          color: #2619daff;
           font-size: 15px;
           outline: none;
           transition: all 0.3s ease;

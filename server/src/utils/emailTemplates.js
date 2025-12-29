@@ -200,14 +200,15 @@ async function sendWelcomeEmail({ to, name, role }) {
             font-size: 20px;
         }
         
-        .welcome-title {
-            font-size: 32px;
-            font-weight: 700;
-            margin: 20px 0 10px;
-            background: linear-gradient(to right, #ffffff, #f0f0ff);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
+       .welcome-title {
+    font-size: 32px;
+    font-weight: 700;
+    margin: 20px 0 10px;
+    background: linear-gradient(to right, #4a4a9c, #2563eb);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
         
         .role-badge {
             display: inline-block;

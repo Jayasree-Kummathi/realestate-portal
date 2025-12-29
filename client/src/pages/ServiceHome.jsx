@@ -581,7 +581,7 @@ export default function ServiceHome() {
                 </button>
                 <button
                   style={styles.ctaButtonSecondary}
-                  onClick={() => navigate("service-provider-login")}
+                  onClick={() => navigate("/service-provider-login")}
                 >
                   Provider Login
                 </button>
