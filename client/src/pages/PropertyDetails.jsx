@@ -532,57 +532,77 @@ export default function PropertyDetails() {
             </>
           )}
 
-          {/* MAP VIEW */}
-          <h3 style={styles.sectionTitle}>Location</h3>
-          <div style={styles.mapWrap}>
-            <iframe
-              title="Property location"
-              src={getMapSrc()}
-              width="100%"
-              height="300"
-              style={styles.mapIframe}
-              loading="lazy"
-              referrerPolicy="no-referrer-when-downgrade"
-              allowFullScreen
-            />
-            <div style={styles.mapActionsRow}>
-              <button
-                style={styles.secondaryButton}
-                onClick={() => {
-                  const coords = property.location?.coordinates;
-                  let href;
-                  if (coords && coords.length >= 2) {
-                    href = `https://www.google.com/maps/search/${encodeURIComponent(property.address || property.areaName || property.title)}`;
-                  } else {
-                    href = `https://www.google.com/maps/search/${encodeURIComponent(property.address || property.areaName || property.title)}`;
-                  }
-                  window.open(href, "_blank", "noopener,noreferrer");
-                }}
-              >
-                Open in Google Maps
-              </button>
-              <button
-                style={styles.secondaryButton}
-                onClick={() => {
-                  // Share location
-                  const text = `Check out this property: ${property.title} at ${property.address}`;
-                  if (navigator.share) {
-                    navigator.share({
-                      title: property.title,
-                      text: text,
-                      url: window.location.href
-                    });
-                  } else {
-                    navigator.clipboard.writeText(window.location.href);
-                    setSubmitMsg("Link copied to clipboard!");
-                  }
-                }}
-              >
-                Share Location
-              </button>
-            </div>
-          </div>
-
+         {/* MAP VIEW */}
+<h3 style={styles.sectionTitle}>Location</h3>
+<div style={styles.mapWrap}>
+  <iframe
+    title="Property location"
+    src={`https://maps.google.com/maps?q=${encodeURIComponent(
+      property.address || 
+      property.areaName || 
+      property.title || 
+      property.city || 
+      'India'
+    )}&output=embed`}
+    width="100%"
+    height="300"
+    style={{
+      border: 0,
+      borderRadius: 10,
+      marginBottom: 15
+    }}
+    loading="lazy"
+    referrerPolicy="no-referrer-when-downgrade"
+    allowFullScreen
+  />
+  
+  <div style={styles.mapActionsRow}>
+    <button
+      style={styles.secondaryButton}
+      onClick={() => {
+        const query = encodeURIComponent(
+          property.address || 
+          property.areaName || 
+          property.title || 
+          property.city || 
+          'India'
+        );
+        const url = `https://www.google.com/maps/search/?api=1&query=${query}`;
+        window.open(url, "_blank", "noopener,noreferrer");
+      }}
+    >
+      Open in Google Maps
+    </button>
+    
+    <button
+      style={styles.secondaryButton}
+      onClick={() => {
+        const query = encodeURIComponent(
+          property.address || 
+          property.areaName || 
+          property.title || 
+          property.city || 
+          'India'
+        );
+        const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${query}`;
+        const text = `Check out this property: ${property.title} at ${property.address}`;
+        
+        if (navigator.share) {
+          navigator.share({
+            title: property.title || 'Property',
+            text: text,
+            url: mapsUrl
+          });
+        } else {
+          navigator.clipboard.writeText(mapsUrl);
+          alert("Map link copied to clipboard!");
+        }
+      }}
+    >
+      Share Location
+    </button>
+  </div>
+</div>
           <hr style={styles.divider} />
 
           {/* DESCRIPTION */}
